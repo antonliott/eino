@@ -31,6 +31,10 @@ type CustomizedAction struct {
 	// After is set when Type is ActionTypeAfterSummarize.
 	// Emitted after summarization.
 	After *AfterSummarizeAction `json:"after,omitempty"`
+
+	// GenerateSummary is set when Type is ActionTypeGenerateSummary.
+	// Emitted after each model generate attempt during summarization.
+	GenerateSummary *GenerateSummaryAction `json:"generate_summary,omitempty"`
 }
 
 type BeforeSummarizeAction struct {
@@ -41,4 +45,15 @@ type BeforeSummarizeAction struct {
 type AfterSummarizeAction struct {
 	// Messages is the final state messages after summarization.
 	Messages []adk.Message `json:"messages,omitempty"`
+}
+
+type GenerateSummaryAction struct {
+	// IsRetry indicates whether the generate attempt is a retry.
+	IsRetry bool `json:"is_retry,omitempty"`
+
+	// IsFailover indicates whether the generate attempt is a failover.
+	IsFailover bool `json:"is_failover,omitempty"`
+
+	// ModelResponse is the raw response returned by the model, if any.
+	ModelResponse adk.Message `json:"model_response,omitempty"`
 }
