@@ -71,6 +71,8 @@ type ChatModelAgentContext struct {
 	// to be (optionally) formatted with SessionValues and converted to system message.
 	Instruction string
 
+	AgentInput *AgentInput
+
 	// Tools are the raw tools (without any wrapper or tool middleware) currently configured for the Agent execution.
 	// They includes tools passed in AgentConfig, implicit tools added by framework such as transfer / exit tools,
 	// and other tools already added by middlewares.
@@ -115,6 +117,11 @@ type ChatModelAgentMiddleware interface {
 	// BeforeAgent is called before each agent run, allowing modification of
 	// the agent's instruction and tools configuration.
 	BeforeAgent(ctx context.Context, runCtx *ChatModelAgentContext) (context.Context, *ChatModelAgentContext, error)
+
+	// AfterAgent is called after the agent run finishes.
+	// The state contains the final message snapshot reconstructed for this run.
+	// The result describes whether the run completed successfully, failed, or was interrupted.
+	AfterAgent(ctx context.Context, state *ChatModelAgentState, result *ChatModelAgentRunResult) (context.Context, *ChatModelAgentState, error)
 
 	// BeforeModelRewriteState is called before each model invocation.
 	// The returned state is persisted to the agent's internal state and passed to the model.
@@ -215,6 +222,12 @@ type ChatModelAgentMiddleware interface {
 //	}
 type BaseChatModelAgentMiddleware struct{}
 
+// ChatModelAgentRunResult describes the outcome of a single ChatModelAgent Run/Resume call.
+type ChatModelAgentRunResult struct {
+	Err         error
+	Interrupted bool
+}
+
 func (b *BaseChatModelAgentMiddleware) WrapInvokableToolCall(_ context.Context, endpoint InvokableToolCallEndpoint, _ *ToolContext) (InvokableToolCallEndpoint, error) {
 	return endpoint, nil
 }
@@ -237,6 +250,10 @@ func (b *BaseChatModelAgentMiddleware) WrapModel(_ context.Context, m model.Base
 
 func (b *BaseChatModelAgentMiddleware) BeforeAgent(ctx context.Context, runCtx *ChatModelAgentContext) (context.Context, *ChatModelAgentContext, error) {
 	return ctx, runCtx, nil
+}
+
+func (b *BaseChatModelAgentMiddleware) AfterAgent(ctx context.Context, state *ChatModelAgentState, result *ChatModelAgentRunResult) (context.Context, *ChatModelAgentState, error) {
+	return ctx, state, nil
 }
 
 func (b *BaseChatModelAgentMiddleware) BeforeModelRewriteState(ctx context.Context, state *ChatModelAgentState, mc *ModelContext) (context.Context, *ChatModelAgentState, error) {

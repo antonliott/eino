@@ -595,9 +595,10 @@ type execContext struct {
 	toolUpdated  bool // whether needs to pass a compose.WithToolList option to ToolsNode due to tool list change
 }
 
-func (a *ChatModelAgent) applyBeforeAgent(ctx context.Context, ec *execContext) (context.Context, *execContext, error) {
+func (a *ChatModelAgent) applyBeforeAgent(ctx context.Context, ec *execContext, agentInput *AgentInput) (context.Context, *execContext, error) {
 	runCtx := &ChatModelAgentContext{
 		Instruction:    ec.instruction,
+		AgentInput:     agentInput,
 		Tools:          cloneSlice(ec.unwrappedTools),
 		ReturnDirectly: copyMap(ec.returnDirectly),
 	}
@@ -753,10 +754,13 @@ func (a *ChatModelAgent) buildNoToolsRunFunc(_ context.Context) runFunc {
 		} else {
 			generator.Send(&AgentEvent{Err: err})
 		}
+
+		// Fire AfterAgent hooks with the final message snapshot stored in state.
+		a.fireAfterAgent(ctx, err, false)
 	}
 }
 
-func (a *ChatModelAgent) buildReactRunFunc(ctx context.Context, bc *execContext) (runFunc, error) {
+func (a *ChatModelAgent) buildReactRunFunc(_ context.Context, bc *execContext) (runFunc, error) {
 	conf := &reactConfig{
 		model:       a.model,
 		toolsConfig: &bc.toolsNodeConf,
@@ -848,12 +852,14 @@ func (a *ChatModelAgent) buildReactRunFunc(ctx context.Context, bc *execContext)
 				msgStream.Close()
 			}
 
+			a.fireAfterAgent(ctx, nil, false)
 			return
 		}
 
 		info, ok := compose.ExtractInterruptInfo(err_)
 		if !ok {
 			generator.Send(&AgentEvent{Err: err_})
+			a.fireAfterAgent(ctx, err_, false)
 			return
 		}
 
@@ -876,6 +882,8 @@ func (a *ChatModelAgent) buildReactRunFunc(ctx context.Context, bc *execContext)
 		}
 		event.AgentName = a.name
 		generator.Send(event)
+
+		a.fireAfterAgent(ctx, err_, true)
 	}, nil
 }
 
@@ -907,7 +915,7 @@ func (a *ChatModelAgent) buildRunFunc(ctx context.Context) runFunc {
 	return a.run
 }
 
-func (a *ChatModelAgent) getRunFunc(ctx context.Context) (context.Context, runFunc, *execContext, error) {
+func (a *ChatModelAgent) getRunFunc(ctx context.Context, agentInput *AgentInput) (context.Context, runFunc, *execContext, error) {
 	defaultRun := a.buildRunFunc(ctx)
 	bc := a.exeCtx
 
@@ -925,7 +933,7 @@ func (a *ChatModelAgent) getRunFunc(ctx context.Context) (context.Context, runFu
 		return ctx, defaultRun, runtimeBC, nil
 	}
 
-	ctx, runtimeBC, err := a.applyBeforeAgent(ctx, bc)
+	ctx, runtimeBC, err := a.applyBeforeAgent(ctx, bc, agentInput)
 	if err != nil {
 		return ctx, nil, nil, err
 	}
@@ -950,7 +958,7 @@ func (a *ChatModelAgent) getRunFunc(ctx context.Context) (context.Context, runFu
 func (a *ChatModelAgent) Run(ctx context.Context, input *AgentInput, opts ...AgentRunOption) *AsyncIterator[*AgentEvent] {
 	iterator, generator := NewAsyncIteratorPair[*AgentEvent]()
 
-	ctx, run, bc, err := a.getRunFunc(ctx)
+	ctx, run, bc, err := a.getRunFunc(ctx, input)
 	if err != nil {
 		go func() {
 			generator.Send(&AgentEvent{Err: err})
@@ -999,7 +1007,7 @@ func (a *ChatModelAgent) Run(ctx context.Context, input *AgentInput, opts ...Age
 func (a *ChatModelAgent) Resume(ctx context.Context, info *ResumeInfo, opts ...AgentRunOption) *AsyncIterator[*AgentEvent] {
 	iterator, generator := NewAsyncIteratorPair[*AgentEvent]()
 
-	ctx, run, bc, err := a.getRunFunc(ctx)
+	ctx, run, bc, err := a.getRunFunc(ctx, nil)
 	if err != nil {
 		go func() {
 			generator.Send(&AgentEvent{Err: err})
@@ -1090,6 +1098,39 @@ func (a *ChatModelAgent) Resume(ctx context.Context, info *ResumeInfo, opts ...A
 	}()
 
 	return iterator
+}
+
+func (a *ChatModelAgent) fireAfterAgent(ctx context.Context, runErr error, interrupted bool) {
+	if len(a.handlers) == 0 {
+		return
+	}
+
+	var messages []Message
+	_ = compose.ProcessState(ctx, func(_ context.Context, st *State) error {
+		messages = cloneSlice(st.Messages)
+		return nil
+	})
+
+	state := &ChatModelAgentState{Messages: messages}
+	result := &ChatModelAgentRunResult{Err: runErr, Interrupted: interrupted}
+
+	for i, handler := range a.handlers {
+		var err error
+		ctx, state, err = handler.AfterAgent(ctx, state, result)
+		if err != nil {
+			getChatModelAgentExecCtx(ctx).send(&AgentEvent{Err: fmt.Errorf("handler[%d] (%T) AfterAgent failed: %w", i, handler, err)})
+			return
+		}
+	}
+
+	// Persist any AfterAgent state rewrites (for example message Extra markers)
+	// back into the compose local state before the run fully finishes.
+	if state != nil {
+		_ = compose.ProcessState(ctx, func(_ context.Context, st *State) error {
+			st.Messages = cloneSlice(state.Messages)
+			return nil
+		})
+	}
 }
 
 func getComposeOptions(opts []AgentRunOption) []compose.Option {
