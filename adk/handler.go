@@ -219,6 +219,25 @@ type TypedChatModelAgentMiddleware[M messageType] interface {
 	// The mc parameter contains the current tool configuration:
 	//   - Tools: The tool infos that will be sent to the model
 	WrapModel(ctx context.Context, m model.BaseModel[M], mc *ModelContext) (model.BaseModel[M], error)
+
+	// BeforeFinalAnswer is called when the model produces a response with no tool calls
+	// (a "final answer") before it is accepted and the agent exits.
+	//
+	// The state contains all messages including the model's final answer as the last message.
+	// The hook can inspect the response (e.g., FinishReason, content) and decide whether
+	// to accept or reject it.
+	//
+	// Returns:
+	//   - ctx: the (possibly modified) context
+	//   - accept: if true, the final answer is accepted and the agent exits normally.
+	//     If false, the agent loops back to the ChatModel for another iteration.
+	//     The handler may modify state.Messages before returning false (e.g., append a
+	//     "please continue" user message after a truncated response).
+	//   - state: the (possibly modified) agent state
+	//   - error: if non-nil, the agent exits with this error
+	//
+	// Rejected answers count toward MaxIterations, providing a natural cap on runaway loops.
+	BeforeFinalAnswer(ctx context.Context, state *ChatModelAgentState) (context.Context, bool, *ChatModelAgentState, error)
 }
 
 // ChatModelAgentMiddleware is the default middleware type using *schema.Message.
@@ -277,6 +296,10 @@ func (b *TypedBaseChatModelAgentMiddleware[M]) AfterModelRewriteState(ctx contex
 
 func (b *TypedBaseChatModelAgentMiddleware[M]) AfterToolCallsRewriteState(ctx context.Context, state *TypedChatModelAgentState[M], tc *ToolCallsContext) (context.Context, *TypedChatModelAgentState[M], error) {
 	return ctx, state, nil
+}
+
+func (b *BaseChatModelAgentMiddleware) BeforeFinalAnswer(ctx context.Context, state *ChatModelAgentState) (context.Context, bool, *ChatModelAgentState, error) {
+	return ctx, true, state, nil
 }
 
 func processTypedState(ctx context.Context, fn func(extra map[string]any) map[string]any) error {

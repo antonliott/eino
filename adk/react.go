@@ -334,9 +334,7 @@ func newReact(ctx context.Context, config *reactConfig) (reactGraph, error) {
 		wrappedModel = buildModelWrappers(config.model, config.modelWrapperConf)
 	}
 
-	toolsConfig := config.toolsConfig
-
-	toolsNode, err := compose.NewToolNode(ctx, toolsConfig)
+	toolsNode, err := compose.NewToolNode(ctx, config.toolsConfig)
 	if err != nil {
 		return nil, err
 	}
@@ -350,9 +348,6 @@ func newReact(ctx context.Context, config *reactConfig) (reactGraph, error) {
 			return input, nil
 		}), compose.WithNodeName(chatModel_))
 
-	// CancelAfterChatModel safe-point: on the tool-calls path, after the branch
-	// has confirmed that the model response contains tool calls (i.e. not a final
-	// answer). Skipped entirely when the model produces a final answer.
 	_ = g.AddLambdaNode(cancelCheckNode_, compose.InvokableLambda(func(ctx context.Context, msg Message) (Message, error) {
 		if cancelCtx != nil && cancelCtx.shouldCancel() {
 			if cancelCtx.getMode()&CancelAfterChatModel != 0 {
@@ -394,8 +389,6 @@ func newReact(ctx context.Context, config *reactConfig) (reactGraph, error) {
 		compose.WithStreamStatePostHandler(toolPostHandle),
 		compose.WithNodeName(toolNode_))
 
-	// AfterToolCalls node: calls AfterToolCallsRewriteState handlers after all tool calls complete.
-	// The graph auto-materializes the ToolsNode stream into []Message before this node.
 	afterToolCalls := func(ctx context.Context, toolResults []Message) ([]Message, error) {
 		var stateMessages []Message
 		_ = compose.ProcessState(ctx, func(_ context.Context, st *State) error {
@@ -431,7 +424,6 @@ func newReact(ctx context.Context, config *reactConfig) (reactGraph, error) {
 	_ = g.AddLambdaNode(afterToolCallsNode_, compose.InvokableLambda(afterToolCalls),
 		compose.WithNodeName(afterToolCallsNode_))
 
-	// AfterToolCallsCancelCheck: CancelAfterToolCalls safe-point, separated from toolPostHandle.
 	afterToolCallsCancelCheck := func(ctx context.Context, toolResults []Message) ([]Message, error) {
 		if cancelCtx != nil && cancelCtx.shouldCancel() {
 			if cancelCtx.getMode()&CancelAfterToolCalls != 0 {
@@ -446,69 +438,125 @@ func newReact(ctx context.Context, config *reactConfig) (reactGraph, error) {
 	_ = g.AddEdge(compose.START, initNode_)
 	_ = g.AddEdge(initNode_, chatModel_)
 
+	addFinalAnswerBranch(g, chatModel_, cancelCheckNode_, config.modelWrapperConf)
+
+	_ = g.AddEdge(cancelCheckNode_, toolNode_)
+	_ = g.AddEdge(toolNode_, afterToolCallsNode_)
+	_ = g.AddEdge(afterToolCallsNode_, afterToolCallsCancelCheckNode_)
+
+	const (
+		toolNodeToEndConverter = "ToolNodeToEndConverter"
+	)
+
+	cvt := func(ctx context.Context, toolResults []Message) (Message, error) {
+		id, _ := getReturnDirectlyToolCallID(ctx)
+
+		for _, msg := range toolResults {
+			if msg != nil && msg.ToolCallID == id {
+				return msg, nil
+			}
+		}
+
+		return nil, errors.New("return directly tool call result not found")
+	}
+
+	_ = g.AddLambdaNode(toolNodeToEndConverter, compose.InvokableLambda(cvt),
+		compose.WithNodeName(toolNodeToEndConverter))
+	_ = g.AddEdge(toolNodeToEndConverter, compose.END)
+
+	checkReturnDirect := func(ctx context.Context, toolResults []Message) (string, error) {
+		_, ok := getReturnDirectlyToolCallID(ctx)
+
+		if ok {
+			return toolNodeToEndConverter, nil
+		}
+
+		return chatModel_, nil
+	}
+
+	returnDirectBranch := compose.NewGraphBranch(checkReturnDirect,
+		map[string]bool{toolNodeToEndConverter: true, chatModel_: true})
+	_ = g.AddBranch(afterToolCallsCancelCheckNode_, returnDirectBranch)
+
+	return g, nil
+}
+
+func runBeforeFinalAnswer(ctx context.Context, mwConf *modelWrapperConfig) (bool, error) {
+	if mwConf == nil || len(mwConf.handlers) == 0 {
+		return true, nil
+	}
+
+	var stateMessages []Message
+	_ = compose.ProcessState(ctx, func(_ context.Context, st *State) error {
+		stateMessages = st.Messages
+		return nil
+	})
+
+	state := &ChatModelAgentState{Messages: stateMessages}
+	accepted := true
+
+	for _, handler := range mwConf.handlers {
+		var accept bool
+		var newState *ChatModelAgentState
+		var err error
+		ctx, accept, newState, err = handler.BeforeFinalAnswer(ctx, state)
+		if err != nil {
+			return false, err
+		}
+		state = newState
+		if !accept {
+			accepted = false
+		}
+	}
+
+	if !accepted {
+		_ = compose.ProcessState(ctx, func(_ context.Context, st *State) error {
+			st.Messages = state.Messages
+			return nil
+		})
+	}
+
+	return accepted, nil
+}
+
+func addFinalAnswerBranch(g *compose.Graph[*reactInput, Message], chatModelNode, cancelCheckNode string, mwConf *modelWrapperConfig) {
+	const finalAnswerRejectionNode_ = "FinalAnswerRejection"
+	_ = g.AddLambdaNode(finalAnswerRejectionNode_, compose.InvokableLambda(func(ctx context.Context, _ Message) ([]Message, error) {
+		var msgs []Message
+		_ = compose.ProcessState(ctx, func(_ context.Context, st *State) error {
+			msgs = st.Messages
+			return nil
+		})
+		return msgs, nil
+	}), compose.WithNodeName(finalAnswerRejectionNode_))
+	_ = g.AddEdge(finalAnswerRejectionNode_, chatModelNode)
+
 	toolCallCheck := func(ctx context.Context, sMsg MessageStream) (string, error) {
 		defer sMsg.Close()
 		for {
 			chunk, err_ := sMsg.Recv()
 			if err_ != nil {
 				if err_ == io.EOF {
-					return compose.END, nil
+					accepted, err := runBeforeFinalAnswer(ctx, mwConf)
+					if err != nil {
+						return "", err
+					}
+					if accepted {
+						return compose.END, nil
+					}
+					return finalAnswerRejectionNode_, nil
 				}
 
 				return "", err_
 			}
 
 			if len(chunk.ToolCalls) > 0 {
-				return cancelCheckNode_, nil
+				return cancelCheckNode, nil
 			}
 		}
 	}
-	branch := compose.NewStreamGraphBranch(toolCallCheck, map[string]bool{compose.END: true, cancelCheckNode_: true})
-	_ = g.AddBranch(chatModel_, branch)
-
-	_ = g.AddEdge(cancelCheckNode_, toolNode_)
-	_ = g.AddEdge(toolNode_, afterToolCallsNode_)
-	_ = g.AddEdge(afterToolCallsNode_, afterToolCallsCancelCheckNode_)
-
-	if len(config.toolsReturnDirectly) > 0 {
-		const (
-			toolNodeToEndConverter = "ToolNodeToEndConverter"
-		)
-
-		cvt := func(ctx context.Context, toolResults []Message) (Message, error) {
-			id, _ := getReturnDirectlyToolCallID(ctx)
-
-			for _, msg := range toolResults {
-				if msg != nil && msg.ToolCallID == id {
-					return msg, nil
-				}
-			}
-
-			return nil, errors.New("return directly tool call result not found")
-		}
-
-		_ = g.AddLambdaNode(toolNodeToEndConverter, compose.InvokableLambda(cvt),
-			compose.WithNodeName(toolNodeToEndConverter))
-		_ = g.AddEdge(toolNodeToEndConverter, compose.END)
-
-		checkReturnDirect := func(ctx context.Context, toolResults []Message) (string, error) {
-			_, ok := getReturnDirectlyToolCallID(ctx)
-
-			if ok {
-				return toolNodeToEndConverter, nil
-			}
-
-			return chatModel_, nil
-		}
-
-		returnDirectBranch := compose.NewGraphBranch(checkReturnDirect,
-			map[string]bool{toolNodeToEndConverter: true, chatModel_: true})
-		_ = g.AddBranch(afterToolCallsCancelCheckNode_, returnDirectBranch)
-	} else {
-		_ = g.AddEdge(afterToolCallsCancelCheckNode_, chatModel_)
-	}
-
-	return g, nil
+	branch := compose.NewStreamGraphBranch(toolCallCheck, map[string]bool{compose.END: true, finalAnswerRejectionNode_: true, cancelCheckNode: true})
+	_ = g.AddBranch(chatModelNode, branch)
 }
 
 type agenticReactInput struct {

@@ -756,8 +756,7 @@ type execContext struct {
 	toolInfos      []*schema.ToolInfo
 	unwrappedTools []tool.BaseTool
 
-	rebuildGraph bool // whether needs to instantiate a new graph because of topology changes due to tool modifications
-	toolUpdated  bool // whether needs to pass a compose.WithToolList option to ToolsNode due to tool list change
+	toolUpdated bool // whether needs to pass a compose.WithToolList option to ToolsNode due to tool list change
 }
 
 func (a *TypedChatModelAgent[M]) applyBeforeAgent(ctx context.Context, ec *execContext) (context.Context, *execContext, error) {
@@ -787,8 +786,6 @@ func (a *TypedChatModelAgent[M]) applyBeforeAgent(ctx context.Context, ec *execC
 		},
 		returnDirectly: runCtx.ReturnDirectly,
 		toolUpdated:    true,
-		rebuildGraph: (len(ec.toolsNodeConf.Tools) == 0 && len(runCtx.Tools) > 0) ||
-			(len(ec.returnDirectly) == 0 && len(runCtx.ReturnDirectly) > 0),
 	}
 
 	toolInfos, err := genToolInfos(ctx, &runtimeEC.toolsNodeConf)
@@ -861,7 +858,7 @@ func (a *TypedChatModelAgent[M]) prepareExecContext(ctx context.Context) (*execC
 	}, nil
 }
 
-// handleRunFuncError is the common error handler for buildNoToolsRunFunc and buildReActRunFunc.
+// handleRunFuncError is the common error handler for buildReActRunFunc.
 // It handles compose interrupts (both cancel-triggered and business)
 // and generic errors, sending the appropriate event to the generator.
 func (a *TypedChatModelAgent[M]) handleRunFuncError(
@@ -1346,9 +1343,8 @@ func (a *TypedChatModelAgent[M]) getRunFunc(ctx context.Context) (context.Contex
 		return ctx, nil, nil, err
 	}
 
-	if !runtimeBC.rebuildGraph {
-		return ctx, defaultRun, runtimeBC, nil
-	}
+	return ctx, defaultRun, runtimeBC, nil
+}
 
 	var tempRun typedRunFunc[M]
 	if len(runtimeBC.toolsNodeConf.Tools) == 0 {
