@@ -22,7 +22,6 @@ import (
 	"io"
 	"strings"
 	"sync"
-	"sync/atomic"
 
 	"github.com/cloudwego/eino/compose"
 	"github.com/cloudwego/eino/schema"
@@ -115,10 +114,28 @@ func (c *eagerCoord) collectResults() (
 	return executedTools, executedEnhancedTools, failedToolCallIDs, nil
 }
 
+type eagerCoordHolder struct {
+	mu    sync.Mutex
+	coord *eagerCoord
+}
+
+func (h *eagerCoordHolder) Store(c *eagerCoord) {
+	h.mu.Lock()
+	h.coord = c
+	h.mu.Unlock()
+}
+
+func (h *eagerCoordHolder) Load() *eagerCoord {
+	h.mu.Lock()
+	c := h.coord
+	h.mu.Unlock()
+	return c
+}
+
 type eagerToolExecutorMiddleware[M MessageType] struct {
 	toolsNode           *compose.ToolsNode
 	toolNodeKey         string
-	coordPtr            *atomic.Pointer[eagerCoord]
+	coordPtr            *eagerCoordHolder
 	executeSequentially bool
 }
 

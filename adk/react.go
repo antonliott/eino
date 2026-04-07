@@ -22,7 +22,6 @@ import (
 	"encoding/gob"
 	"errors"
 	"io"
-	"sync/atomic"
 
 	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/compose"
@@ -335,9 +334,9 @@ func newReact(ctx context.Context, config *reactConfig) (reactGraph, error) {
 
 	toolsConfig := config.toolsConfig
 
-	var eagerCoordPtr *atomic.Pointer[eagerCoord]
+	var eagerCoordPtr *eagerCoordHolder
 	if config.eagerExecution {
-		eagerCoordPtr = &atomic.Pointer[eagerCoord]{}
+		eagerCoordPtr = &eagerCoordHolder{}
 		config.toolsConfig.ToolExecutionProvider = func(ctx context.Context, input *schema.Message) (
 			map[string]string, map[string]*schema.ToolResult, []string, error,
 		) {
@@ -605,9 +604,9 @@ func newAgenticReact(ctx context.Context, config *agenticReactConfig) (agenticRe
 
 	var wrappedModel model.AgenticModel = config.model
 
-	var eagerCoordPtr *atomic.Pointer[eagerCoord]
+	var eagerCoordPtr *eagerCoordHolder
 	if config.eagerExecution {
-		eagerCoordPtr = &atomic.Pointer[eagerCoord]{}
+		eagerCoordPtr = &eagerCoordHolder{}
 		config.toolsConfig.ToolExecutionProvider = func(ctx context.Context, input *schema.Message) (
 			map[string]string, map[string]*schema.ToolResult, []string, error,
 		) {
