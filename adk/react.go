@@ -310,6 +310,42 @@ func genReactState(config *reactConfig) func(ctx context.Context) *State {
 	}
 }
 
+func setupEagerToolExecutionProvider(config *compose.ToolsNodeConfig, eagerExecution bool) *eagerCoordHolder {
+	if !eagerExecution {
+		return nil
+	}
+	holder := &eagerCoordHolder{}
+	config.ToolExecutionProvider = func(ctx context.Context, input *schema.Message) (
+		map[string]string, map[string]*schema.ToolResult, []string, error,
+	) {
+		coord := holder.Load()
+		if coord == nil {
+			return nil, nil, nil, nil
+		}
+		coord.waitDone(ctx)
+		return coord.collectResults()
+	}
+	return holder
+}
+
+func wireEagerToolExec[M MessageType](
+	coordPtr *eagerCoordHolder,
+	toolsNode *compose.ToolsNode,
+	toolNodeKey string,
+	executeSequentially bool,
+	wrapperConf *typedModelWrapperConfig[M],
+) {
+	if coordPtr == nil {
+		return
+	}
+	wrapperConf.eagerToolExec = &eagerToolExecutorMiddleware[M]{
+		toolsNode:           toolsNode,
+		toolNodeKey:         toolNodeKey,
+		coordPtr:            coordPtr,
+		executeSequentially: executeSequentially,
+	}
+}
+
 func newReact(ctx context.Context, config *reactConfig) (reactGraph, error) {
 	const (
 		initNode_                      = "Init"
@@ -334,35 +370,14 @@ func newReact(ctx context.Context, config *reactConfig) (reactGraph, error) {
 
 	toolsConfig := config.toolsConfig
 
-	var eagerCoordPtr *eagerCoordHolder
-	if config.eagerExecution {
-		eagerCoordPtr = &eagerCoordHolder{}
-		config.toolsConfig.ToolExecutionProvider = func(ctx context.Context, input *schema.Message) (
-			map[string]string, map[string]*schema.ToolResult, []string, error,
-		) {
-			coord := eagerCoordPtr.Load()
-			if coord == nil {
-				return nil, nil, nil, nil
-			}
-			coord.waitDone(ctx)
-			return coord.collectResults()
-		}
-	}
+	eagerCoordPtr := setupEagerToolExecutionProvider(toolsConfig, config.eagerExecution)
 
 	toolsNode, err := compose.NewToolNode(ctx, toolsConfig)
 	if err != nil {
 		return nil, err
 	}
 
-	if config.eagerExecution {
-		eagerExec := &eagerToolExecutorMiddleware[Message]{
-			toolsNode:           toolsNode,
-			toolNodeKey:         toolNode_,
-			coordPtr:            eagerCoordPtr,
-			executeSequentially: config.toolsConfig.ExecuteSequentially,
-		}
-		config.modelWrapperConf.eagerToolExec = eagerExec
-	}
+	wireEagerToolExec(eagerCoordPtr, toolsNode, toolNode_, config.toolsConfig.ExecuteSequentially, config.modelWrapperConf)
 
 	if config.modelWrapperConf != nil {
 		wrappedModel = buildModelWrappers(config.model, config.modelWrapperConf)
@@ -604,20 +619,7 @@ func newAgenticReact(ctx context.Context, config *agenticReactConfig) (agenticRe
 
 	var wrappedModel model.AgenticModel = config.model
 
-	var eagerCoordPtr *eagerCoordHolder
-	if config.eagerExecution {
-		eagerCoordPtr = &eagerCoordHolder{}
-		config.toolsConfig.ToolExecutionProvider = func(ctx context.Context, input *schema.Message) (
-			map[string]string, map[string]*schema.ToolResult, []string, error,
-		) {
-			coord := eagerCoordPtr.Load()
-			if coord == nil {
-				return nil, nil, nil, nil
-			}
-			coord.waitDone(ctx)
-			return coord.collectResults()
-		}
-	}
+	eagerCoordPtr := setupEagerToolExecutionProvider(config.toolsConfig, config.eagerExecution)
 
 	toolsNode, err := compose.NewAgenticToolsNode(ctx, config.toolsConfig)
 	if err != nil {
@@ -629,13 +631,7 @@ func newAgenticReact(ctx context.Context, config *agenticReactConfig) (agenticRe
 		if eagerErr != nil {
 			return nil, eagerErr
 		}
-		eagerExec := &eagerToolExecutorMiddleware[*schema.AgenticMessage]{
-			toolsNode:           eagerToolsNode,
-			toolNodeKey:         toolNode_,
-			coordPtr:            eagerCoordPtr,
-			executeSequentially: config.toolsConfig.ExecuteSequentially,
-		}
-		config.modelWrapperConf.eagerToolExec = eagerExec
+		wireEagerToolExec[*schema.AgenticMessage](eagerCoordPtr, eagerToolsNode, toolNode_, config.toolsConfig.ExecuteSequentially, config.modelWrapperConf)
 	}
 
 	if config.modelWrapperConf != nil {
