@@ -139,9 +139,9 @@ func (t *agentTool) InvokableRun(ctx context.Context, argumentsInJSON string, op
 	// With TaskMgr: delegate execution and lifecycle management.
 	background := input.RunInBackground != nil && *input.RunInBackground
 	result, err := t.mgr.Run(ctx, &RunInput{
-		SubagentType: input.SubagentType,
-		Prompt:       prompt,
-		Description:  description,
+		SubagentType:    input.SubagentType,
+		Prompt:          prompt,
+		Description:     description,
 		RunInBackground: background,
 	}, opts...)
 	if err != nil {

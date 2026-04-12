@@ -406,11 +406,11 @@ func (m *TaskMgr) register(ctx context.Context, description string, background b
 
 	rec := &taskRecord{
 		task: Task{
-			ID:           id,
-			Description:  description,
-			Status:       StatusRunning,
+			ID:              id,
+			Description:     description,
+			Status:          StatusRunning,
 			RunInBackground: background,
-			CreatedAt:    time.Now(),
+			CreatedAt:       time.Now(),
 		},
 		cancel: cancel,
 	}
