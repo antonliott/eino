@@ -27,6 +27,7 @@ import (
 	"github.com/cloudwego/eino/adk/filesystem"
 	"github.com/cloudwego/eino/adk/internal"
 	filesystem2 "github.com/cloudwego/eino/adk/middlewares/filesystem"
+	"github.com/cloudwego/eino/adk/middlewares/subagent"
 	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/components/tool/utils"
 	"github.com/cloudwego/eino/schema"
@@ -121,24 +122,21 @@ func New(ctx context.Context, cfg *Config) (adk.ResumableAgent, error) {
 	}
 
 	if !cfg.WithoutGeneralSubAgent || len(cfg.SubAgents) > 0 {
-		tt, err := newTaskToolMiddleware(
-			ctx,
-			cfg.TaskToolDescriptionGenerator,
-			cfg.SubAgents,
-
-			cfg.WithoutGeneralSubAgent,
-			cfg.ChatModel,
-			instruction,
-			cfg.ToolsConfig,
-			cfg.MaxIteration,
-			cfg.Middlewares,
-			append(handlers, cfg.Handlers...),
-			cfg.ModelFailoverConfig,
-		)
+		allSubAgents, err := buildSubAgentsList(ctx, cfg, instruction, handlers)
 		if err != nil {
-			return nil, fmt.Errorf("failed to new task tool: %w", err)
+			return nil, err
 		}
-		handlers = append(handlers, tt)
+		if len(allSubAgents) > 0 {
+			subagentMW, err := subagent.New(ctx, &subagent.Config{
+				SubAgents:                    allSubAgents,
+				AgentToolName:                taskToolName,
+				TaskToolDescriptionGenerator: cfg.TaskToolDescriptionGenerator,
+			})
+			if err != nil {
+				return nil, fmt.Errorf("failed to create subagent middleware: %w", err)
+			}
+			handlers = append(handlers, subagentMW)
+		}
 	}
 
 	return adk.NewChatModelAgent(ctx, &adk.ChatModelAgentConfig{
@@ -153,7 +151,7 @@ func New(ctx context.Context, cfg *Config) (adk.ResumableAgent, error) {
 
 		GenModelInput:       genModelInput,
 		ModelRetryConfig:    cfg.ModelRetryConfig,
-		ModelFailoverConfig: cfg.ModelFailoverConfig,
+		ModelFailoverConfig: nil,
 		OutputKey:           cfg.OutputKey,
 	})
 }
@@ -168,6 +166,35 @@ func genModelInput(ctx context.Context, instruction string, input *adk.AgentInpu
 	msgs = append(msgs, input.Messages...)
 
 	return msgs, nil
+}
+
+func buildSubAgentsList(ctx context.Context, cfg *Config, instruction string, handlers []adk.ChatModelAgentMiddleware) ([]adk.Agent, error) {
+	var allSubAgents []adk.Agent
+
+	if !cfg.WithoutGeneralSubAgent {
+		agentDesc := internal.SelectPrompt(internal.I18nPrompts{
+			English: generalAgentDescription,
+			Chinese: generalAgentDescriptionChinese,
+		})
+		generalAgent, err := adk.NewChatModelAgent(ctx, &adk.ChatModelAgentConfig{
+			Name:          generalAgentName,
+			Description:   agentDesc,
+			Instruction:   instruction,
+			Model:         cfg.ChatModel,
+			ToolsConfig:   cfg.ToolsConfig,
+			MaxIterations: cfg.MaxIteration,
+			Middlewares:   cfg.Middlewares,
+			Handlers:      append(handlers, cfg.Handlers...),
+			GenModelInput: genModelInput,
+		})
+		if err != nil {
+			return nil, err
+		}
+		allSubAgents = append(allSubAgents, generalAgent)
+	}
+
+	allSubAgents = append(allSubAgents, cfg.SubAgents...)
+	return allSubAgents, nil
 }
 
 func buildBuiltinAgentMiddlewares(ctx context.Context, cfg *Config) ([]adk.ChatModelAgentMiddleware, error) {
