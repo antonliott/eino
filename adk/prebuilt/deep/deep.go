@@ -128,9 +128,9 @@ func New(ctx context.Context, cfg *Config) (adk.ResumableAgent, error) {
 		}
 		if len(allSubAgents) > 0 {
 			subagentMW, err := subagent.New(ctx, &subagent.Config{
-				SubAgents:                    allSubAgents,
-				AgentToolName:                taskToolName,
-				TaskToolDescriptionGenerator: cfg.TaskToolDescriptionGenerator,
+				SubAgents:                allSubAgents,
+				ToolName:                 taskToolName,
+				ToolDescriptionGenerator: cfg.TaskToolDescriptionGenerator,
 			})
 			if err != nil {
 				return nil, fmt.Errorf("failed to create subagent middleware: %w", err)
@@ -151,7 +151,7 @@ func New(ctx context.Context, cfg *Config) (adk.ResumableAgent, error) {
 
 		GenModelInput:       genModelInput,
 		ModelRetryConfig:    cfg.ModelRetryConfig,
-		ModelFailoverConfig: nil,
+		ModelFailoverConfig: cfg.ModelFailoverConfig,
 		OutputKey:           cfg.OutputKey,
 	})
 }

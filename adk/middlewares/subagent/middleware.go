@@ -1,5 +1,5 @@
 /*
- * Copyright 2025 CloudWeGo Authors
+ * Copyright 2026 CloudWeGo Authors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -22,7 +22,6 @@ import (
 
 	"github.com/cloudwego/eino/adk"
 	"github.com/cloudwego/eino/adk/internal"
-	"github.com/cloudwego/eino/adk/taskstate"
 	"github.com/cloudwego/eino/components/tool"
 )
 
@@ -32,24 +31,26 @@ type Config struct {
 	// Each agent must have a unique name. Required.
 	SubAgents []adk.Agent
 
-	// AgentToolName overrides the name of the agent-spawning tool.
+	// ToolName overrides the name of the agent-spawning tool.
 	// When empty, defaults to "agent".
-	AgentToolName string
+	ToolName string
 
-	// TaskStateMgr is an optional task state manager for background task support.
-	// When nil, only foreground (blocking) agent execution is available.
-	// When set, the middleware injects TaskOutput and TaskStop tools in addition to
-	// the Agent tool, and the Agent tool gains a run_in_background parameter.
-	TaskStateMgr taskstate.Manager
+	// TaskMgr is an optional TaskMgr for background task support.
+	// When nil, only foreground (blocking) agent execution is available, and agent runs
+	// are NOT tracked. When set, ALL agent runs (foreground and background) are managed
+	// by the TaskMgr, making them visible via Get/List/Notifications. The middleware also
+	// injects TaskOutput and TaskStop tools, and the Agent tool gains a run_in_background parameter.
+	TaskMgr *TaskMgr
 
-	// TaskToolDescriptionGenerator overrides the default agent tool description generator.
+	// ToolDescriptionGenerator overrides the default agent tool description generator.
 	// The generator receives the list of sub-agents and should return a complete tool
 	// description string. When nil, defaultAgentToolDescription is used.
-	TaskToolDescriptionGenerator func(ctx context.Context, subAgents []adk.Agent) (string, error)
+	ToolDescriptionGenerator func(ctx context.Context, subAgents []adk.Agent) (string, error)
 
-	// CustomSystemPrompt overrides the default system prompt injected by BeforeAgent.
+	// SystemPrompt overrides the default system prompt injected by BeforeAgent.
 	// When nil, the built-in prompt (with i18n support) is used.
-	CustomSystemPrompt *string
+	// Defined as *string because an empty string may be an intentional user value.
+	SystemPrompt *string
 }
 
 // Validate checks the Config for correctness.
@@ -72,7 +73,7 @@ func (c *Config) Validate() error {
 
 // New creates a ChatModelAgentMiddleware that injects sub-agent tools into the agent context.
 //
-// The middleware injects an Agent tool for spawning sub-agents. When Config.TaskStateMgr is
+// The middleware injects an Agent tool for spawning sub-agents. When Config.TaskMgr is
 // provided, it also injects TaskOutput and TaskStop tools for background task management.
 //
 // The middleware uses context-based recursion prevention: when the parent agent's BeforeAgent
@@ -83,7 +84,7 @@ func New(ctx context.Context, config *Config) (adk.ChatModelAgentMiddleware, err
 		return nil, err
 	}
 
-	// Build sub-agent map: name → InvokableTool.
+	// Build sub-agent map: name → InvokableTool (for non-TaskMgr foreground path).
 	subAgentMap := make(map[string]tool.InvokableTool, len(config.SubAgents))
 	for _, a := range config.SubAgents {
 		name := a.Name(ctx)
@@ -93,47 +94,59 @@ func New(ctx context.Context, config *Config) (adk.ChatModelAgentMiddleware, err
 			return nil, fmt.Errorf("subagent: agent %q does not implement InvokableTool", name)
 		}
 		subAgentMap[name] = it
+
+		// Register agents into TaskMgr for Run to resolve by name.
+		if config.TaskMgr != nil {
+			config.TaskMgr.RegisterAgent(name, a)
+		}
 	}
 
-	hasBackground := config.TaskStateMgr != nil
+	enableRunInBackground := config.TaskMgr != nil
 
-	toolName := config.AgentToolName
+	toolName := config.ToolName
 	if toolName == "" {
 		toolName = agentToolName
 	}
 
 	descGen := defaultAgentToolDescription
-	if config.TaskToolDescriptionGenerator != nil {
-		descGen = config.TaskToolDescriptionGenerator
+	if config.ToolDescriptionGenerator != nil {
+		descGen = config.ToolDescriptionGenerator
 	}
 
 	at := &agentTool{
-		name:          toolName,
-		subAgents:     subAgentMap,
-		subAgentSlice: config.SubAgents,
-		descGen:       descGen,
-		mgr:           config.TaskStateMgr,
-		hasBackground: hasBackground,
+		name:                  toolName,
+		subAgents:             subAgentMap,
+		subAgentSlice:         config.SubAgents,
+		descGen:               descGen,
+		mgr:                   config.TaskMgr,
+		enableRunInBackground: enableRunInBackground,
 	}
 
 	var tools []tool.BaseTool
 	tools = append(tools, at)
 
-	if hasBackground {
-		tools = append(tools, &taskOutputTool{mgr: config.TaskStateMgr})
-		tools = append(tools, &taskStopTool{mgr: config.TaskStateMgr})
+	if enableRunInBackground {
+		outputTool, err := newTaskOutputTool(config.TaskMgr)
+		if err != nil {
+			return nil, fmt.Errorf("subagent: failed to create task_output tool: %w", err)
+		}
+		stopTool, err := newTaskStopTool(config.TaskMgr)
+		if err != nil {
+			return nil, fmt.Errorf("subagent: failed to create task_stop tool: %w", err)
+		}
+		tools = append(tools, outputTool, stopTool)
 	}
 
 	// Build system prompt.
 	var instruction string
-	if config.CustomSystemPrompt != nil {
-		instruction = *config.CustomSystemPrompt
+	if config.SystemPrompt != nil {
+		instruction = *config.SystemPrompt
 	} else {
 		instruction = internal.SelectPrompt(internal.I18nPrompts{
 			English: agentToolPrompt,
 			Chinese: agentToolPromptChinese,
 		})
-		if hasBackground {
+		if enableRunInBackground {
 			instruction += internal.SelectPrompt(internal.I18nPrompts{
 				English: agentToolBackgroundPrompt,
 				Chinese: agentToolBackgroundPromptChinese,
@@ -147,8 +160,6 @@ func New(ctx context.Context, config *Config) (adk.ChatModelAgentMiddleware, err
 	}, nil
 }
 
-type subagentCtxKey struct{}
-
 type subagentMiddleware struct {
 	adk.BaseChatModelAgentMiddleware
 	tools       []tool.BaseTool
@@ -156,20 +167,13 @@ type subagentMiddleware struct {
 }
 
 // BeforeAgent injects sub-agent tools and instructions into the agent context.
-// Uses a context marker to prevent re-injection in nested sub-agent calls.
 func (m *subagentMiddleware) BeforeAgent(ctx context.Context, runCtx *adk.ChatModelAgentContext) (context.Context, *adk.ChatModelAgentContext, error) {
 	if runCtx == nil {
 		return ctx, runCtx, nil
 	}
 
-	// Recursion prevention: if this context already has the marker, skip injection.
-	if ctx.Value(subagentCtxKey{}) != nil {
-		return ctx, runCtx, nil
-	}
-
-	nCtx := context.WithValue(ctx, subagentCtxKey{}, true)
 	nRunCtx := *runCtx
 	nRunCtx.Instruction += "\n" + m.instruction
 	nRunCtx.Tools = append(nRunCtx.Tools, m.tools...)
-	return nCtx, &nRunCtx, nil
+	return ctx, &nRunCtx, nil
 }

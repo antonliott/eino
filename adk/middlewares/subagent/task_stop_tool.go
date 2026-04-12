@@ -1,5 +1,5 @@
 /*
- * Copyright 2025 CloudWeGo Authors
+ * Copyright 2026 CloudWeGo Authors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -18,54 +18,26 @@ package subagent
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 
 	"github.com/cloudwego/eino/adk/internal"
-	"github.com/cloudwego/eino/adk/taskstate"
 	"github.com/cloudwego/eino/components/tool"
-	"github.com/cloudwego/eino/schema"
+	"github.com/cloudwego/eino/components/tool/utils"
 )
 
-type taskStopTool struct {
-	mgr taskstate.Manager
-}
-
 type taskStopInput struct {
-	TaskID string `json:"task_id"`
+	TaskID string `json:"task_id" jsonschema:"required" jsonschema_description:"The ID of the background task to stop"`
 }
 
-func (t *taskStopTool) Info(_ context.Context) (*schema.ToolInfo, error) {
+func newTaskStopTool(mgr *TaskMgr) (tool.InvokableTool, error) {
 	desc := internal.SelectPrompt(internal.I18nPrompts{
 		English: taskStopToolDescription,
 		Chinese: taskStopToolDescriptionChinese,
 	})
-	return &schema.ToolInfo{
-		Name: taskStopToolName,
-		Desc: desc,
-		ParamsOneOf: schema.NewParamsOneOfByParams(map[string]*schema.ParameterInfo{
-			"task_id": {
-				Type:     schema.String,
-				Desc:     "The ID of the background task to stop",
-				Required: true,
-			},
-		}),
-	}, nil
-}
-
-func (t *taskStopTool) InvokableRun(_ context.Context, argumentsInJSON string, _ ...tool.Option) (string, error) {
-	input := &taskStopInput{}
-	if err := json.Unmarshal([]byte(argumentsInJSON), input); err != nil {
-		return "", fmt.Errorf("failed to unmarshal task_stop input: %w", err)
-	}
-
-	if input.TaskID == "" {
-		return "", fmt.Errorf("task_id is required")
-	}
-
-	if err := t.mgr.Cancel(input.TaskID); err != nil {
-		return fmt.Sprintf("Failed to stop task %q: %s", input.TaskID, err.Error()), nil
-	}
-
-	return fmt.Sprintf("Successfully stopped task: %s", input.TaskID), nil
+	return utils.InferTool(taskStopToolName, desc, func(ctx context.Context, input taskStopInput) (string, error) {
+		if err := mgr.Cancel(input.TaskID); err != nil {
+			return fmt.Sprintf("Failed to stop task %q: %s", input.TaskID, err.Error()), nil
+		}
+		return fmt.Sprintf("Successfully stopped task: %s", input.TaskID), nil
+	})
 }

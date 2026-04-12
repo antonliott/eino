@@ -1,5 +1,5 @@
 /*
- * Copyright 2025 CloudWeGo Authors
+ * Copyright 2026 CloudWeGo Authors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -18,71 +18,47 @@ package subagent
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 
 	"github.com/cloudwego/eino/adk/internal"
-	"github.com/cloudwego/eino/adk/taskstate"
 	"github.com/cloudwego/eino/components/tool"
-	"github.com/cloudwego/eino/schema"
+	"github.com/cloudwego/eino/components/tool/utils"
 )
 
-type taskOutputTool struct {
-	mgr taskstate.Manager
-}
-
 type taskOutputInput struct {
-	TaskID string `json:"task_id"`
+	TaskID string `json:"task_id" jsonschema:"required" jsonschema_description:"The task ID to get output from"`
 }
 
-func (t *taskOutputTool) Info(_ context.Context) (*schema.ToolInfo, error) {
+func newTaskOutputTool(mgr *TaskMgr) (tool.InvokableTool, error) {
 	desc := internal.SelectPrompt(internal.I18nPrompts{
 		English: taskOutputToolDescription,
 		Chinese: taskOutputToolDescriptionChinese,
 	})
-	return &schema.ToolInfo{
-		Name: taskOutputToolName,
-		Desc: desc,
-		ParamsOneOf: schema.NewParamsOneOfByParams(map[string]*schema.ParameterInfo{
-			"task_id": {
-				Type:     schema.String,
-				Desc:     "The task ID to get output from",
-				Required: true,
-			},
-		}),
-	}, nil
+	return utils.InferTool(taskOutputToolName, desc, func(ctx context.Context, input taskOutputInput) (string, error) {
+		task, ok := mgr.Get(input.TaskID)
+		if !ok {
+			return fmt.Sprintf("Task %q not found", input.TaskID), nil
+		}
+
+		// Mark this task's result as queried by the main agent.
+		mgr.MarkQueried(input.TaskID)
+
+		return formatTask(task), nil
+	})
 }
 
-func (t *taskOutputTool) InvokableRun(_ context.Context, argumentsInJSON string, _ ...tool.Option) (string, error) {
-	input := &taskOutputInput{}
-	if err := json.Unmarshal([]byte(argumentsInJSON), input); err != nil {
-		return "", fmt.Errorf("failed to unmarshal task_output input: %w", err)
-	}
-
-	if input.TaskID == "" {
-		return "", fmt.Errorf("task_id is required")
-	}
-
-	entry, ok := t.mgr.Get(input.TaskID)
-	if !ok {
-		return fmt.Sprintf("Task %q not found", input.TaskID), nil
-	}
-
-	return formatTaskEntry(entry), nil
-}
-
-func formatTaskEntry(entry *taskstate.Entry) string {
+func formatTask(task *Task) string {
 	result := fmt.Sprintf("Task ID: %s\nDescription: %s\nStatus: %s",
-		entry.ID, entry.Description, entry.Status)
+		task.ID, task.Description, task.Status)
 
-	if entry.Result != "" {
-		result += fmt.Sprintf("\nResult: %s", entry.Result)
+	if task.Result != "" {
+		result += fmt.Sprintf("\nResult: %s", task.Result)
 	}
-	if entry.Error != "" {
-		result += fmt.Sprintf("\nError: %s", entry.Error)
+	if task.Error != "" {
+		result += fmt.Sprintf("\nError: %s", task.Error)
 	}
-	if entry.DoneAt != nil {
-		result += fmt.Sprintf("\nCompleted at: %s", entry.DoneAt.Format("2006-01-02 15:04:05"))
+	if task.DoneAt != nil {
+		result += fmt.Sprintf("\nCompleted at: %s", task.DoneAt.Format("2006-01-02 15:04:05"))
 	}
 
 	return result

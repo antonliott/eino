@@ -1,5 +1,5 @@
 /*
- * Copyright 2025 CloudWeGo Authors
+ * Copyright 2026 CloudWeGo Authors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -26,7 +26,6 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/cloudwego/eino/adk"
-	"github.com/cloudwego/eino/adk/taskstate"
 	"github.com/cloudwego/eino/schema"
 )
 
@@ -96,7 +95,7 @@ func TestBeforeAgent_InjectsToolsAndInstruction(t *testing.T) {
 		Instruction: "base instruction",
 	}
 
-	newCtx, newRunCtx, err := mw.BeforeAgent(ctx, runCtx)
+	_, newRunCtx, err := mw.BeforeAgent(ctx, runCtx)
 	require.NoError(t, err)
 
 	// Instruction should be appended.
@@ -105,33 +104,6 @@ func TestBeforeAgent_InjectsToolsAndInstruction(t *testing.T) {
 
 	// Agent tool should be injected.
 	assert.Len(t, newRunCtx.Tools, 1)
-
-	// Context should have the recursion marker.
-	assert.NotNil(t, newCtx.Value(subagentCtxKey{}))
-}
-
-func TestBeforeAgent_RecursionPrevention(t *testing.T) {
-	ctx := context.Background()
-	mw, err := New(ctx, &Config{
-		SubAgents: []adk.Agent{
-			&mockAgent{name: "helper", desc: "helps"},
-		},
-	})
-	require.NoError(t, err)
-
-	runCtx := &adk.ChatModelAgentContext{
-		Instruction: "base",
-	}
-
-	// First call: injects tools.
-	newCtx, newRunCtx, err := mw.BeforeAgent(ctx, runCtx)
-	require.NoError(t, err)
-	assert.Len(t, newRunCtx.Tools, 1)
-
-	// Second call with returned context: skips injection.
-	_, secondRunCtx, err := mw.BeforeAgent(newCtx, runCtx)
-	require.NoError(t, err)
-	assert.Len(t, secondRunCtx.Tools, 0) // original runCtx, no tools added
 }
 
 func TestBeforeAgent_NilRunCtx(t *testing.T) {
@@ -149,9 +121,9 @@ func TestBeforeAgent_NilRunCtx(t *testing.T) {
 	assert.Equal(t, ctx, newCtx)
 }
 
-func TestBeforeAgent_WithBackground_InjectsThreeTools(t *testing.T) {
+func TestBeforeAgent_WithTaskMgr_InjectsThreeTools(t *testing.T) {
 	ctx := context.Background()
-	mgr := taskstate.NewInMemoryManager()
+	mgr := NewTaskMgr()
 	defer func() {
 		closeCtx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 		defer cancel()
@@ -162,7 +134,7 @@ func TestBeforeAgent_WithBackground_InjectsThreeTools(t *testing.T) {
 		SubAgents: []adk.Agent{
 			&mockAgent{name: "worker", desc: "does work"},
 		},
-		TaskStateMgr: mgr,
+		TaskMgr: mgr,
 	})
 	require.NoError(t, err)
 
@@ -187,7 +159,7 @@ func TestBeforeAgent_CustomSystemPrompt(t *testing.T) {
 		SubAgents: []adk.Agent{
 			&mockAgent{name: "helper", desc: "helps"},
 		},
-		CustomSystemPrompt: &customPrompt,
+		SystemPrompt: &customPrompt,
 	})
 	require.NoError(t, err)
 
@@ -218,21 +190,15 @@ func TestAgentTool_ForegroundRouting(t *testing.T) {
 
 	// Get the agent tool.
 	require.Len(t, newRunCtx.Tools, 1)
-	agentT, ok := newRunCtx.Tools[0].(interface {
-		InvokableRun(ctx context.Context, argumentsInJSON string, opts ...interface{ isOption() }) (string, error)
-	})
-	// The tool implements InvokableTool, use the concrete type.
-	_ = agentT
-	_ = ok
 
 	// Use the tool directly.
 	at := newRunCtx.Tools[0].(*agentTool)
 
-	result, err := at.InvokableRun(ctx, `{"subagent_type":"agent1","description":"test task"}`)
+	result, err := at.InvokableRun(ctx, `{"subagent_type":"agent1","prompt":"test task","description":"test"}`)
 	require.NoError(t, err)
 	assert.Equal(t, "desc of agent 1", result)
 
-	result, err = at.InvokableRun(ctx, `{"subagent_type":"agent2","description":"test task"}`)
+	result, err = at.InvokableRun(ctx, `{"subagent_type":"agent2","prompt":"test task","description":"test"}`)
 	require.NoError(t, err)
 	assert.Equal(t, "desc of agent 2", result)
 }
@@ -251,14 +217,14 @@ func TestAgentTool_NotFound(t *testing.T) {
 	require.NoError(t, err)
 
 	at := newRunCtx.Tools[0].(*agentTool)
-	_, err = at.InvokableRun(ctx, `{"subagent_type":"nonexistent","description":"test"}`)
+	_, err = at.InvokableRun(ctx, `{"subagent_type":"nonexistent","prompt":"test","description":"test"}`)
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "not found")
 }
 
 func TestAgentTool_Background(t *testing.T) {
 	ctx := context.Background()
-	mgr := taskstate.NewInMemoryManager()
+	mgr := NewTaskMgr()
 	defer func() {
 		closeCtx, cancel := context.WithTimeout(context.Background(), time.Second)
 		defer cancel()
@@ -275,8 +241,8 @@ func TestAgentTool_Background(t *testing.T) {
 	}
 
 	mw, err := New(ctx, &Config{
-		SubAgents:    []adk.Agent{slowAgent},
-		TaskStateMgr: mgr,
+		SubAgents: []adk.Agent{slowAgent},
+		TaskMgr:   mgr,
 	})
 	require.NoError(t, err)
 
@@ -285,7 +251,7 @@ func TestAgentTool_Background(t *testing.T) {
 	require.NoError(t, err)
 
 	at := newRunCtx.Tools[0].(*agentTool)
-	result, err := at.InvokableRun(ctx, `{"subagent_type":"slow","description":"bg task","run_in_background":true}`)
+	result, err := at.InvokableRun(ctx, `{"subagent_type":"slow","prompt":"bg task detail","description":"bg task","run_in_background":true}`)
 	require.NoError(t, err)
 	assert.Contains(t, result, "launched in background")
 
@@ -296,8 +262,8 @@ func TestAgentTool_Background(t *testing.T) {
 	// Check the notification.
 	select {
 	case n := <-mgr.Notifications():
-		assert.Equal(t, taskstate.StatusCompleted, n.Entry.Status)
-		assert.Equal(t, "slow result", n.Entry.Result)
+		assert.Equal(t, StatusCompleted, n.Task.Status)
+		assert.Equal(t, "slow result", n.Task.Result)
 	case <-time.After(time.Second):
 		t.Fatal("timed out waiting for notification")
 	}
@@ -329,7 +295,7 @@ func TestAgentTool_CustomName(t *testing.T) {
 		SubAgents: []adk.Agent{
 			&mockAgent{name: "helper", desc: "helps"},
 		},
-		AgentToolName: "task",
+		ToolName: "task",
 	})
 	require.NoError(t, err)
 
@@ -345,35 +311,49 @@ func TestAgentTool_CustomName(t *testing.T) {
 // --- TaskOutput Tool Tests ---
 
 func TestTaskOutputTool(t *testing.T) {
-	mgr := taskstate.NewInMemoryManager()
+	mgr := NewTaskMgr()
 	defer func() {
 		closeCtx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 		defer cancel()
 		_ = mgr.Close(closeCtx)
 	}()
 
-	h, err := mgr.Register(context.Background(), &taskstate.RegisterInfo{Description: "test task"})
+	// Create a mock agent to run through TaskMgr
+	mockA := &mockAgent{name: "mock", desc: "task result"}
+	mgr.RegisterAgent("mock", mockA)
+	result, err := mgr.Run(context.Background(), &RunInput{
+		SubagentType: "mock",
+		Prompt:       "do something",
+		Description:  "test task",
+	})
 	require.NoError(t, err)
-	h.Complete("task result")
+	require.Equal(t, StatusCompleted, result.Status)
 
-	tool := &taskOutputTool{mgr: mgr}
-	result, err := tool.InvokableRun(context.Background(), fmt.Sprintf(`{"task_id":"%s"}`, h.ID))
+	tl, err := newTaskOutputTool(mgr)
 	require.NoError(t, err)
-	assert.Contains(t, result, "test task")
-	assert.Contains(t, result, "task result")
-	assert.Contains(t, result, "completed")
+	output, err := tl.InvokableRun(context.Background(), fmt.Sprintf(`{"task_id":"%s"}`, result.TaskID))
+	require.NoError(t, err)
+	assert.Contains(t, output, "test task")
+	assert.Contains(t, output, "task result")
+	assert.Contains(t, output, "completed")
+
+	// Verify that TaskOutput marks the result as queried.
+	task, ok := mgr.Get(result.TaskID)
+	require.True(t, ok)
+	assert.True(t, task.ResultQueried)
 }
 
 func TestTaskOutputTool_NotFound(t *testing.T) {
-	mgr := taskstate.NewInMemoryManager()
+	mgr := NewTaskMgr()
 	defer func() {
 		closeCtx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 		defer cancel()
 		_ = mgr.Close(closeCtx)
 	}()
 
-	tool := &taskOutputTool{mgr: mgr}
-	result, err := tool.InvokableRun(context.Background(), `{"task_id":"nonexistent"}`)
+	tl, err := newTaskOutputTool(mgr)
+	require.NoError(t, err)
+	result, err := tl.InvokableRun(context.Background(), `{"task_id":"nonexistent"}`)
 	require.NoError(t, err)
 	assert.Contains(t, result, "not found")
 }
@@ -381,41 +361,183 @@ func TestTaskOutputTool_NotFound(t *testing.T) {
 // --- TaskStop Tool Tests ---
 
 func TestTaskStopTool(t *testing.T) {
-	mgr := taskstate.NewInMemoryManager()
+	mgr := NewTaskMgr()
 	defer func() {
 		closeCtx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 		defer cancel()
 		_ = mgr.Close(closeCtx)
 	}()
 
-	h, err := mgr.Register(context.Background(), &taskstate.RegisterInfo{Description: "running task"})
+	// Start a slow background task
+	slowA := &mockAgent{
+		name: "slow",
+		desc: "done",
+		runFunc: func(ctx context.Context, input *adk.AgentInput) string {
+			<-ctx.Done()
+			return ""
+		},
+	}
+	mgr.RegisterAgent("slow", slowA)
+	runResult, err := mgr.Run(context.Background(), &RunInput{
+		SubagentType: "slow",
+		Prompt:       "run slow",
+		Description:  "running task",
+		RunInBackground: true,
+	})
 	require.NoError(t, err)
 
-	tool := &taskStopTool{mgr: mgr}
-	result, err := tool.InvokableRun(context.Background(), fmt.Sprintf(`{"task_id":"%s"}`, h.ID))
+	tl, err := newTaskStopTool(mgr)
+	require.NoError(t, err)
+	result, err := tl.InvokableRun(context.Background(), fmt.Sprintf(`{"task_id":"%s"}`, runResult.TaskID))
 	require.NoError(t, err)
 	assert.Contains(t, result, "Successfully stopped")
 
-	// Verify the task is cancelled.
-	entry, ok := mgr.Get(h.ID)
+	// Verify the task is killed.
+	task, ok := mgr.Get(runResult.TaskID)
 	require.True(t, ok)
-	assert.Equal(t, taskstate.StatusCancelled, entry.Status)
+	assert.Equal(t, StatusCanceled, task.Status)
 }
 
 func TestTaskStopTool_AlreadyDone(t *testing.T) {
-	mgr := taskstate.NewInMemoryManager()
+	mgr := NewTaskMgr()
 	defer func() {
 		closeCtx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 		defer cancel()
 		_ = mgr.Close(closeCtx)
 	}()
 
-	h, err := mgr.Register(context.Background(), &taskstate.RegisterInfo{Description: "done task"})
+	mockA := &mockAgent{name: "mock", desc: "done"}
+	mgr.RegisterAgent("mock", mockA)
+	runResult, err := mgr.Run(context.Background(), &RunInput{
+		SubagentType: "mock",
+		Prompt:       "do something",
+		Description:  "done task",
+	})
 	require.NoError(t, err)
-	h.Complete("done")
+	require.Equal(t, StatusCompleted, runResult.Status)
 
-	tool := &taskStopTool{mgr: mgr}
-	result, err := tool.InvokableRun(context.Background(), fmt.Sprintf(`{"task_id":"%s"}`, h.ID))
+	tl, err := newTaskStopTool(mgr)
+	require.NoError(t, err)
+	result, err := tl.InvokableRun(context.Background(), fmt.Sprintf(`{"task_id":"%s"}`, runResult.TaskID))
 	require.NoError(t, err)
 	assert.Contains(t, result, "Failed to stop")
 }
+
+// --- Foreground with TaskMgr tracking ---
+
+func TestAgentTool_ForegroundWithTaskMgr(t *testing.T) {
+	ctx := context.Background()
+	mgr := NewTaskMgr()
+	defer func() {
+		closeCtx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		_ = mgr.Close(closeCtx)
+	}()
+
+	agent := &mockAgent{name: "fast", desc: "fast agent"}
+
+	mw, err := New(ctx, &Config{
+		SubAgents: []adk.Agent{agent},
+		TaskMgr:   mgr,
+	})
+	require.NoError(t, err)
+
+	runCtx := &adk.ChatModelAgentContext{}
+	_, newRunCtx, err := mw.BeforeAgent(ctx, runCtx)
+	require.NoError(t, err)
+
+	at := newRunCtx.Tools[0].(*agentTool)
+
+	// Foreground run with TaskMgr: should block and return result.
+	result, err := at.InvokableRun(ctx, `{"subagent_type":"fast","prompt":"foreground task detail","description":"foreground task"}`)
+	require.NoError(t, err)
+	assert.Equal(t, "fast agent", result)
+
+	// Task should be completed in TaskMgr.
+	assert.False(t, mgr.HasRunning())
+	tasks := mgr.List()
+	require.Len(t, tasks, 1)
+	assert.Equal(t, StatusCompleted, tasks[0].Status)
+	assert.Equal(t, "fast agent", tasks[0].Result)
+}
+
+// --- Auto-background ---
+
+func TestAgentTool_AutoBackground(t *testing.T) {
+	ctx := context.Background()
+	mgr := NewTaskMgr(WithAutoBackground(50)) // 50ms timeout
+	defer func() {
+		closeCtx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		_ = mgr.Close(closeCtx)
+	}()
+
+	slowAgent := &mockAgent{
+		name: "slow",
+		desc: "slow agent",
+		runFunc: func(ctx context.Context, input *adk.AgentInput) string {
+			time.Sleep(200 * time.Millisecond)
+			return "slow result"
+		},
+	}
+
+	mw, err := New(ctx, &Config{
+		SubAgents: []adk.Agent{slowAgent},
+		TaskMgr:   mgr,
+	})
+	require.NoError(t, err)
+
+	runCtx := &adk.ChatModelAgentContext{}
+	_, newRunCtx, err := mw.BeforeAgent(ctx, runCtx)
+	require.NoError(t, err)
+
+	at := newRunCtx.Tools[0].(*agentTool)
+
+	// Should auto-background after 50ms since agent takes 200ms.
+	result, err := at.InvokableRun(ctx, `{"subagent_type":"slow","prompt":"auto-bg task detail","description":"auto-bg task"}`)
+	require.NoError(t, err)
+	assert.Contains(t, result, "launched in background")
+
+	// Task should still be running.
+	assert.True(t, mgr.HasRunning())
+
+	// Wait for completion.
+	err = mgr.WaitAllDone(context.Background())
+	require.NoError(t, err)
+
+	tasks := mgr.List()
+	require.Len(t, tasks, 1)
+	assert.Equal(t, StatusCompleted, tasks[0].Status)
+	assert.Equal(t, "slow result", tasks[0].Result)
+}
+
+func TestAgentTool_AutoBackground_FastAgent(t *testing.T) {
+	ctx := context.Background()
+	mgr := NewTaskMgr(WithAutoBackground(5000)) // 5s timeout, agent finishes instantly
+	defer func() {
+		closeCtx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		_ = mgr.Close(closeCtx)
+	}()
+
+	fastAgent := &mockAgent{name: "fast", desc: "fast agent"}
+
+	mw, err := New(ctx, &Config{
+		SubAgents: []adk.Agent{fastAgent},
+		TaskMgr:   mgr,
+	})
+	require.NoError(t, err)
+
+	runCtx := &adk.ChatModelAgentContext{}
+	_, newRunCtx, err := mw.BeforeAgent(ctx, runCtx)
+	require.NoError(t, err)
+
+	at := newRunCtx.Tools[0].(*agentTool)
+
+	// Fast agent completes before timeout — should return foreground result.
+	result, err := at.InvokableRun(ctx, `{"subagent_type":"fast","prompt":"fast task detail","description":"fast task"}`)
+	require.NoError(t, err)
+	assert.Equal(t, "fast agent", result)
+	assert.False(t, mgr.HasRunning())
+}
+
