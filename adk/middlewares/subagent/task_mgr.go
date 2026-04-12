@@ -207,24 +207,26 @@ func (m *TaskMgr) Run(ctx context.Context, input *RunInput, opts ...tool.Option)
 		return nil, fmt.Errorf("subagent: agent %q does not implement InvokableTool", input.SubagentType)
 	}
 
-	resultCh := make(chan runResult, 1)
-	go func() {
+	run := func() runResult {
 		r, runErr := invokable.InvokableRun(taskCtx, params, opts...)
 		if runErr != nil {
 			m.fail(id, runErr)
 		} else {
 			m.complete(id, r)
 		}
-		resultCh <- runResult{r, runErr}
-	}()
+		return runResult{r, runErr}
+	}
 
-	// Explicit background: return immediately.
+	// Explicit background: run in goroutine, return immediately.
 	if input.RunInBackground {
+		go run()
 		return &RunResult{TaskID: id, Status: StatusRunning}, nil
 	}
 
-	// Auto-background: wait with timeout, then switch to background.
+	// Auto-background: run in goroutine, wait with timeout, then switch to background.
 	if m.autoBackgroundMs > 0 {
+		resultCh := make(chan runResult, 1)
+		go func() { resultCh <- run() }()
 		select {
 		case r := <-resultCh:
 			return m.toRunResult(id, r), nil
@@ -233,8 +235,8 @@ func (m *TaskMgr) Run(ctx context.Context, input *RunInput, opts ...tool.Option)
 		}
 	}
 
-	// Foreground: block until completion.
-	r := <-resultCh
+	// Foreground: run inline, no goroutine needed.
+	r := run()
 	return m.toRunResult(id, r), nil
 }
 
