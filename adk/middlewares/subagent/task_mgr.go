@@ -18,15 +18,13 @@ package subagent
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strconv"
 	"sync"
 	"time"
 
-	"github.com/bytedance/sonic"
-
 	"github.com/cloudwego/eino/adk"
-	"github.com/cloudwego/eino/components/tool"
 )
 
 // Status represents the lifecycle status of a task.
@@ -133,7 +131,8 @@ func NewTaskMgr(opts ...TaskMgrOption) *TaskMgr {
 //
 // TaskMgr is Agent-aware: it maintains a registry of agents (via RegisterAgent),
 // resolves them by name in Run, and manages foreground/background/auto-background
-// switching internally. Future interrupt/resume support will also live here.
+// switching internally. Agents are executed via adk.Runner.Query, which handles
+// the agent lifecycle without needing to wrap agents as tools.
 type TaskMgr struct {
 	mu               sync.Mutex
 	cond             *sync.Cond
@@ -147,8 +146,8 @@ type TaskMgr struct {
 
 type taskRecord struct {
 	task   Task
-	cancel context.CancelFunc
-	done   bool // guards complete/fail idempotency
+	cancel adk.AgentCancelFunc
+	done   bool // true once task reaches a terminal state
 }
 
 // runResult carries the result from a goroutine running the sub-agent.
@@ -173,46 +172,38 @@ func (m *TaskMgr) RegisterAgent(name string, agent adk.Agent) {
 // Run executes a registered agent as a managed task.
 //
 // The agent is resolved by input.SubagentType from the internal registry (see RegisterAgent).
-// The execution mode depends on input.Background and TaskMgr configuration:
+// Execution uses adk.Runner.Query to run the agent directly, without wrapping it as a tool.
+//
+// The execution mode depends on input.RunInBackground and TaskMgr configuration:
 //   - Foreground (RunInBackground=false, autoBackgroundMs=0): blocks until completion
 //   - Background (RunInBackground=true): returns immediately with StatusRunning
 //   - AutoBackground (autoBackgroundMs>0): foreground with timeout, auto-switches to background
 //
 // All runs are tracked in TaskMgr state and visible via Get/List/Notifications.
-func (m *TaskMgr) Run(ctx context.Context, input *RunInput, opts ...tool.Option) (*RunResult, error) {
+func (m *TaskMgr) Run(ctx context.Context, input *RunInput) (*RunResult, error) {
 	agent, ok := m.getAgent(input.SubagentType)
 	if !ok {
 		return nil, fmt.Errorf("subagent: agent %q not registered in TaskMgr", input.SubagentType)
 	}
 
-	id, taskCtx, err := m.register(ctx, input.Description, input.RunInBackground)
+	id, err := m.createTask(input.Description, input.RunInBackground)
 	if err != nil {
 		return nil, err
 	}
 
-	// Build the request params for the agent tool wrapper.
-	params, err := sonic.MarshalString(map[string]string{
-		"request": input.Prompt,
-	})
-	if err != nil {
-		m.fail(id, err)
-		return nil, fmt.Errorf("subagent: failed to marshal agent params: %w", err)
-	}
-
-	// Wrap the Agent as an InvokableTool for execution.
-	bt := adk.NewAgentTool(ctx, agent)
-	invokable, invokableOK := bt.(tool.InvokableTool)
-	if !invokableOK {
-		m.fail(id, fmt.Errorf("agent %q does not implement InvokableTool", input.SubagentType))
-		return nil, fmt.Errorf("subagent: agent %q does not implement InvokableTool", input.SubagentType)
-	}
+	// Set up cancel support. The AgentRunOption is passed to Runner.Query,
+	// and the AgentCancelFunc is stored so Cancel() can invoke it.
+	cancelOpt, cancelFn := adk.WithCancel()
+	m.storeCancelFunc(id, cancelFn)
 
 	run := func() runResult {
-		r, runErr := invokable.InvokableRun(taskCtx, params, opts...)
+		runner := adk.NewRunner(ctx, adk.RunnerConfig{Agent: agent})
+		iter := runner.Query(ctx, input.Prompt, cancelOpt)
+		r, runErr := drainEvents(iter)
 		if runErr != nil {
-			m.fail(id, runErr)
+			m.failTask(id, runErr)
 		} else {
-			m.complete(id, r)
+			m.completeTask(id, r)
 		}
 		return runResult{r, runErr}
 	}
@@ -286,7 +277,7 @@ func (m *TaskMgr) List() []*Task {
 	return tasks
 }
 
-// Cancel stops a running task. The task's context will be canceled,
+// Cancel stops a running task. The agent's cancel function will be invoked,
 // and the task will transition to StatusCanceled.
 // Returns an error if the task does not exist or is not running.
 func (m *TaskMgr) Cancel(id string) error {
@@ -301,14 +292,7 @@ func (m *TaskMgr) Cancel(id string) error {
 		return fmt.Errorf("subagent: task %q is not running (status: %s)", id, rec.task.Status)
 	}
 
-	rec.done = true
-	rec.cancel()
-	now := time.Now()
-	rec.task.Status = StatusCanceled
-	rec.task.DoneAt = &now
-
-	m.sendNotificationLocked(&Notification{Task: cloneTask(&rec.task)})
-	m.cond.Broadcast()
+	m.cancelTask(rec)
 	return nil
 }
 
@@ -370,12 +354,7 @@ func (m *TaskMgr) Close(ctx context.Context) error {
 
 	for _, rec := range m.tasks {
 		if !rec.done {
-			rec.done = true
-			rec.cancel()
-			now := time.Now()
-			rec.task.Status = StatusCanceled
-			rec.task.DoneAt = &now
-			m.sendNotificationLocked(&Notification{Task: cloneTask(&rec.task)})
+			m.cancelTask(rec)
 		}
 	}
 
@@ -383,26 +362,20 @@ func (m *TaskMgr) Close(ctx context.Context) error {
 	return nil
 }
 
-func (m *TaskMgr) getAgent(name string) (adk.Agent, bool) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
+// --- Task state machine methods ---
 
-	agent, ok := m.agents[name]
-	return agent, ok
-}
-
-func (m *TaskMgr) register(ctx context.Context, description string, background bool) (string, context.Context, error) {
+// createTask registers a new task in StatusRunning state.
+// The cancel function is not set here — call storeCancelFunc after creation.
+func (m *TaskMgr) createTask(description string, background bool) (string, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
 	if m.closed {
-		return "", nil, fmt.Errorf("subagent: task manager is closed")
+		return "", fmt.Errorf("subagent: task manager is closed")
 	}
 
 	m.seq++
-	id := "t_" + strconv.FormatInt(m.seq, 10)
-
-	taskCtx, cancel := context.WithCancel(ctx)
+	id := "task_" + strconv.FormatInt(m.seq, 10)
 
 	rec := &taskRecord{
 		task: Task{
@@ -412,52 +385,90 @@ func (m *TaskMgr) register(ctx context.Context, description string, background b
 			RunInBackground: background,
 			CreatedAt:       time.Now(),
 		},
-		cancel: cancel,
 	}
 	m.tasks[id] = rec
 
-	return id, taskCtx, nil
+	return id, nil
 }
 
-func (m *TaskMgr) complete(id, result string) {
+// storeCancelFunc saves the AgentCancelFunc for a running task.
+// Called after createTask but before the agent starts executing,
+// so that Cancel() can invoke it.
+func (m *TaskMgr) storeCancelFunc(id string, cancel adk.AgentCancelFunc) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
+	if rec, ok := m.tasks[id]; ok {
+		rec.cancel = cancel
+	}
+}
+
+// completeTask transitions a task to StatusCompleted with the given result.
+// No-op if the task is already in a terminal state (idempotent).
+func (m *TaskMgr) completeTask(id string, result string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	m.finalize(id, func(rec *taskRecord) {
+		rec.task.Status = StatusCompleted
+		rec.task.Result = result
+	})
+}
+
+// failTask transitions a task to StatusFailed with the given error.
+// No-op if the task is already in a terminal state (idempotent).
+func (m *TaskMgr) failTask(id string, err error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	m.finalize(id, func(rec *taskRecord) {
+		rec.task.Status = StatusFailed
+		if err != nil {
+			rec.task.Error = err.Error()
+		}
+	})
+}
+
+// cancelTask transitions a task to StatusCanceled and invokes its cancel function.
+// Must be called with m.mu held.
+func (m *TaskMgr) cancelTask(rec *taskRecord) {
+	if rec.cancel != nil {
+		rec.cancel()
+	}
+
+	m.finalize(rec.task.ID, func(rec *taskRecord) {
+		rec.task.Status = StatusCanceled
+	})
+}
+
+// finalize applies a terminal state transition to a task.
+// It sets done=true, records DoneAt, sends a notification, and broadcasts the condition.
+// Returns false if the task was not found or already in a terminal state (idempotent).
+// Must be called with m.mu held.
+func (m *TaskMgr) finalize(id string, apply func(rec *taskRecord)) bool {
 	rec, ok := m.tasks[id]
 	if !ok || rec.done {
-		return
+		return false
 	}
 
 	rec.done = true
 	now := time.Now()
-	rec.task.Status = StatusCompleted
-	rec.task.Result = result
 	rec.task.DoneAt = &now
+	apply(rec)
 
 	m.sendNotificationLocked(&Notification{Task: cloneTask(&rec.task)})
 	m.cond.Broadcast()
+	return true
 }
 
-func (m *TaskMgr) fail(id string, err error) {
+// --- Internal helpers ---
+
+func (m *TaskMgr) getAgent(name string) (adk.Agent, bool) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	rec, ok := m.tasks[id]
-	if !ok || rec.done {
-		return
-	}
-
-	rec.done = true
-	rec.cancel()
-	now := time.Now()
-	rec.task.Status = StatusFailed
-	if err != nil {
-		rec.task.Error = err.Error()
-	}
-	rec.task.DoneAt = &now
-
-	m.sendNotificationLocked(&Notification{Task: cloneTask(&rec.task)})
-	m.cond.Broadcast()
+	agent, ok := m.agents[name]
+	return agent, ok
 }
 
 func (m *TaskMgr) hasRunningLocked() bool {
@@ -476,6 +487,50 @@ func (m *TaskMgr) sendNotificationLocked(n *Notification) {
 	case m.notifications <- n:
 	default:
 	}
+}
+
+// drainEvents consumes all events from the iterator and returns the final message content.
+// It closes intermediate MessageStreams to prevent resource leaks.
+// This replicates the relevant subset of agentTool.InvokableRun's event loop
+// (without InternalAgentEvents forwarding or interrupt handling).
+func drainEvents(iter *adk.AsyncIterator[*adk.AgentEvent]) (string, error) {
+	var lastEvent *adk.AgentEvent
+	for {
+		event, ok := iter.Next()
+		if !ok {
+			break
+		}
+
+		// Close previous event's MessageStream to prevent leaks.
+		if lastEvent != nil &&
+			lastEvent.Output != nil &&
+			lastEvent.Output.MessageOutput != nil &&
+			lastEvent.Output.MessageOutput.MessageStream != nil {
+			lastEvent.Output.MessageOutput.MessageStream.Close()
+		}
+
+		if event.Err != nil {
+			return "", event.Err
+		}
+
+		lastEvent = event
+	}
+
+	if lastEvent == nil {
+		return "", errors.New("subagent: no event returned from agent")
+	}
+
+	if lastEvent.Output != nil {
+		if output := lastEvent.Output.MessageOutput; output != nil {
+			msg, err := output.GetMessage()
+			if err != nil {
+				return "", err
+			}
+			return msg.Content, nil
+		}
+	}
+
+	return "", nil
 }
 
 func cloneTask(t *Task) *Task {

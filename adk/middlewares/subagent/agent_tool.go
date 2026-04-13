@@ -143,7 +143,7 @@ func (t *agentTool) InvokableRun(ctx context.Context, argumentsInJSON string, op
 		Prompt:          prompt,
 		Description:     description,
 		RunInBackground: background,
-	}, opts...)
+	})
 	if err != nil {
 		return "", err
 	}

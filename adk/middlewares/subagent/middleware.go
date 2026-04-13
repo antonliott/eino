@@ -35,13 +35,6 @@ type Config struct {
 	// When empty, defaults to "agent".
 	ToolName string
 
-	// TaskMgr is an optional TaskMgr for background task support.
-	// When nil, only foreground (blocking) agent execution is available, and agent runs
-	// are NOT tracked. When set, ALL agent runs (foreground and background) are managed
-	// by the TaskMgr, making them visible via Get/List/Notifications. The middleware also
-	// injects TaskOutput and TaskStop tools, and the Agent tool gains a run_in_background parameter.
-	TaskMgr *TaskMgr
-
 	// ToolDescriptionGenerator overrides the default agent tool description generator.
 	// The generator receives the list of sub-agents and should return a complete tool
 	// description string. When nil, defaultAgentToolDescription is used.
@@ -51,6 +44,13 @@ type Config struct {
 	// When nil, the built-in prompt (with i18n support) is used.
 	// Defined as *string because an empty string may be an intentional user value.
 	SystemPrompt *string
+
+	// TaskMgr is an optional TaskMgr for background task support.
+	// When nil, only foreground (blocking) agent execution is available, and agent runs
+	// are NOT tracked. When set, ALL agent runs (foreground and background) are managed
+	// by the TaskMgr, making them visible via Get/List/Notifications. The middleware also
+	// injects TaskOutput and TaskStop tools, and the Agent tool gains a run_in_background parameter.
+	TaskMgr *TaskMgr
 }
 
 // Validate checks the Config for correctness.
