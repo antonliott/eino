@@ -246,9 +246,7 @@ func handleFlowAgentEvents(ctx context.Context, iter *AsyncIterator[*AgentEvent]
 		}
 
 		if parentSession != nil && (event.Action == nil || event.Action.Interrupted == nil) {
-			copied := copyAgentEvent(event)
-			setAutomaticClose(copied)
-			setAutomaticClose(event)
+			copied := CopyAgentEvent(event)
 			parentSession.addEvent(copied)
 		}
 

@@ -70,7 +70,7 @@ func copyEventIterator(iter *AsyncIterator[*AgentEvent], n int) []*AsyncIterator
 				break
 			}
 			for i := 0; i < n-1; i++ {
-				generators[i].Send(copyAgentEvent(event))
+				generators[i].Send(CopyAgentEvent(event))
 			}
 			generators[n-1].Send(event)
 		}

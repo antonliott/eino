@@ -166,7 +166,7 @@ func defaultAgentToolDescription(ctx context.Context, subAgents []adk.Agent) (st
 	for _, a := range subAgents {
 		name := a.Name(ctx)
 		desc := a.Description(ctx)
-		fmt.Fprintf(&subAgentsDescBuilder, "- %s: %s\n", name, desc)
+		_, _ = fmt.Fprintf(&subAgentsDescBuilder, "- %s: %s\n", name, desc)
 	}
 	toolDesc := internal.SelectPrompt(internal.I18nPrompts{
 		English: agentToolDescription,

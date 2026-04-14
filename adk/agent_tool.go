@@ -211,7 +211,7 @@ func (at *agentTool) InvokableRun(ctx context.Context, argumentsInJSON string, o
 					rp = append(rp, event.RunPath...)
 					event.RunPath = rp
 				}
-				tmp := copyAgentEvent(event)
+				tmp := CopyAgentEvent(event)
 				gen.Send(event)
 				event = tmp
 			}

@@ -53,24 +53,6 @@ type Config struct {
 	TaskMgr *TaskMgr
 }
 
-// Validate checks the Config for correctness.
-func (c *Config) Validate() error {
-	if len(c.SubAgents) == 0 {
-		return fmt.Errorf("subagent: SubAgents must not be empty")
-	}
-
-	names := make(map[string]struct{}, len(c.SubAgents))
-	for _, a := range c.SubAgents {
-		name := a.Name(context.Background())
-		if _, exists := names[name]; exists {
-			return fmt.Errorf("subagent: duplicate agent name %q", name)
-		}
-		names[name] = struct{}{}
-	}
-
-	return nil
-}
-
 // New creates a ChatModelAgentMiddleware that injects sub-agent tools into the agent context.
 //
 // The middleware injects an Agent tool for spawning sub-agents. When Config.TaskMgr is
@@ -80,7 +62,7 @@ func (c *Config) Validate() error {
 // sets a context marker, sub-agents created through this middleware will not have the sub-agent
 // tools re-injected, preventing infinite nesting.
 func New(ctx context.Context, config *Config) (adk.ChatModelAgentMiddleware, error) {
-	if err := config.Validate(); err != nil {
+	if err := validate(ctx, config); err != nil {
 		return nil, err
 	}
 
@@ -176,4 +158,21 @@ func (m *subagentMiddleware) BeforeAgent(ctx context.Context, runCtx *adk.ChatMo
 	nRunCtx.Instruction += "\n" + m.instruction
 	nRunCtx.Tools = append(nRunCtx.Tools, m.tools...)
 	return ctx, &nRunCtx, nil
+}
+
+func validate(ctx context.Context, c *Config) error {
+	if len(c.SubAgents) == 0 {
+		return fmt.Errorf("subagent: SubAgents must not be empty")
+	}
+
+	names := make(map[string]struct{}, len(c.SubAgents))
+	for _, a := range c.SubAgents {
+		name := a.Name(ctx)
+		if _, exists := names[name]; exists {
+			return fmt.Errorf("subagent: duplicate agent name %q", name)
+		}
+		names[name] = struct{}{}
+	}
+
+	return nil
 }

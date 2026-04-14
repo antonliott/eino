@@ -25,6 +25,7 @@ import (
 	"time"
 
 	"github.com/cloudwego/eino/adk"
+	"github.com/cloudwego/eino/internal"
 )
 
 // Status represents the lifecycle status of a task.
@@ -69,10 +70,16 @@ type Task struct {
 	Metadata map[string]any
 }
 
-// Notification is emitted when a task reaches a terminal state (completed, failed, or canceled).
+// Notification is emitted when a task's status changes.
+// A running notification includes an Events iterator for streaming agent events.
+// Terminal notifications (completed, failed, canceled) contain the final task state.
 type Notification struct {
-	// Task contains the final state of the task.
+	// Task contains the current state of the task at the time of notification.
 	Task *Task
+	// Events streams agent events from the running task.
+	// Non-nil only when Task.Status is StatusRunning.
+	// The iterator is closed automatically when the task reaches a terminal state.
+	Events *adk.AsyncIterator[*adk.AgentEvent]
 }
 
 // RunResult is the return value of TaskMgr.Run.
@@ -101,27 +108,31 @@ type RunInput struct {
 	RunInBackground bool
 }
 
-// TaskMgrOption configures a TaskMgr.
-type TaskMgrOption func(*TaskMgr)
+// defaultAutoBackgroundMs is the default auto-background timeout (120 seconds).
+const defaultAutoBackgroundMs = 120_000
 
-// WithAutoBackground enables automatic foreground-to-background switching.
-// When ms > 0, a foreground agent run that hasn't completed within this many
-// milliseconds will automatically switch to background mode.
-func WithAutoBackground(ms int) TaskMgrOption {
-	return func(m *TaskMgr) {
-		m.autoBackgroundMs = ms
-	}
+// TaskMgrConfig configures a TaskMgr.
+type TaskMgrConfig struct {
+	// AutoBackgroundMs sets the automatic foreground-to-background switching timeout.
+	// When > 0, a foreground agent run that hasn't completed within this many
+	// milliseconds will automatically switch to background mode.
+	// When 0, auto-background is disabled (foreground runs block indefinitely).
+	//
+	// Default: 120000ms (120 seconds).
+	AutoBackgroundMs *int
 }
 
 // NewTaskMgr creates a new TaskMgr for managing sub-agent task lifecycles.
-func NewTaskMgr(opts ...TaskMgrOption) *TaskMgr {
+// By default, auto-background is enabled with a 120-second timeout.
+// Set AutoBackgroundMs to 0 to disable it.
+func NewTaskMgr(_ context.Context, conf *TaskMgrConfig) *TaskMgr {
 	m := &TaskMgr{
-		tasks:         make(map[string]*taskRecord),
-		notifications: make(chan *Notification, 256),
+		tasks:            make(map[string]*taskRecord),
+		autoBackgroundMs: defaultAutoBackgroundMs,
 	}
 	m.cond = sync.NewCond(&m.mu)
-	for _, opt := range opts {
-		opt(m)
+	if conf.AutoBackgroundMs != nil {
+		m.autoBackgroundMs = *conf.AutoBackgroundMs
 	}
 	return m
 }
@@ -139,15 +150,20 @@ type TaskMgr struct {
 	tasks            map[string]*taskRecord
 	agents           map[string]adk.Agent // agent registry: name → Agent
 	seq              int64
-	notifications    chan *Notification
 	closed           bool
 	autoBackgroundMs int
+
+	// Subscription fields, initialized lazily by Subscribe().
+	subscribeOnce sync.Once
+	notifyCh      chan *Notification
+	notifyBuf     *internal.UnboundedChan[*Notification]
 }
 
 type taskRecord struct {
-	task   Task
-	cancel adk.AgentCancelFunc
-	done   bool // true once task reaches a terminal state
+	task     Task
+	cancel   adk.AgentCancelFunc
+	done     bool                                 // true once task reaches a terminal state
+	eventGen *adk.AsyncGenerator[*adk.AgentEvent] // closed on terminal state
 }
 
 // runResult carries the result from a goroutine running the sub-agent.
@@ -186,7 +202,7 @@ func (m *TaskMgr) Run(ctx context.Context, input *RunInput) (*RunResult, error) 
 		return nil, fmt.Errorf("subagent: agent %q not registered in TaskMgr", input.SubagentType)
 	}
 
-	id, err := m.createTask(input.Description, input.RunInBackground)
+	id, eventGen, err := m.createTask(input.Description, input.RunInBackground)
 	if err != nil {
 		return nil, err
 	}
@@ -199,7 +215,7 @@ func (m *TaskMgr) Run(ctx context.Context, input *RunInput) (*RunResult, error) 
 	run := func() runResult {
 		runner := adk.NewRunner(ctx, adk.RunnerConfig{Agent: agent})
 		iter := runner.Query(ctx, input.Prompt, cancelOpt)
-		r, runErr := drainEvents(iter)
+		r, runErr := drainEvents(iter, eventGen)
 		if runErr != nil {
 			m.failTask(id, runErr)
 		} else {
@@ -296,10 +312,35 @@ func (m *TaskMgr) Cancel(id string) error {
 	return nil
 }
 
-// Notifications returns a read-only channel that receives a Notification
-// each time a task reaches a terminal state.
-func (m *TaskMgr) Notifications() <-chan *Notification {
-	return m.notifications
+// Subscribe returns a channel that receives a Notification each time a task
+// reaches a terminal state (completed, failed, or canceled).
+//
+// Subscribe uses a subscription model: only notifications generated after the
+// subscription is created will be delivered. To query the state of tasks that
+// completed before subscribing, use Get or List.
+//
+// The returned channel is closed when TaskMgr.Close is called.
+// Subscribe must be called before starting tasks to avoid missing notifications.
+// Multiple calls return the same channel.
+func (m *TaskMgr) Subscribe() <-chan *Notification {
+	m.subscribeOnce.Do(func() {
+		m.notifyBuf = internal.NewUnboundedChan[*Notification]()
+		m.notifyCh = make(chan *Notification)
+		go m.relayNotifications()
+	})
+	return m.notifyCh
+}
+
+// relayNotifications pumps notifications from the unbounded buffer to the Go channel.
+func (m *TaskMgr) relayNotifications() {
+	defer close(m.notifyCh)
+	for {
+		n, ok := m.notifyBuf.Receive()
+		if !ok {
+			return
+		}
+		m.notifyCh <- n
+	}
 }
 
 // HasRunning reports whether any tasks are currently in StatusRunning.
@@ -342,7 +383,9 @@ func (m *TaskMgr) WaitAllDone(ctx context.Context) error {
 
 // Close performs graceful shutdown.
 // It waits for all running tasks to complete (up to the ctx deadline),
-// then cancels any remaining running tasks and closes the Notifications channel.
+// then cancels any remaining running tasks.
+// If Subscribe was called, the notification channel is closed after all
+// pending notifications have been delivered.
 // After Close returns, Run will return an error.
 func (m *TaskMgr) Close(ctx context.Context) error {
 	_ = m.WaitAllDone(ctx)
@@ -358,24 +401,28 @@ func (m *TaskMgr) Close(ctx context.Context) error {
 		}
 	}
 
-	close(m.notifications)
+	if m.notifyBuf != nil {
+		m.notifyBuf.Close()
+	}
+
 	return nil
 }
 
-// --- Task state machine methods ---
-
-// createTask registers a new task in StatusRunning state.
+// createTask registers a new task in StatusRunning state and sends a running notification.
+// Returns the task ID and an event generator for forwarding agent events to the subscriber.
 // The cancel function is not set here — call storeCancelFunc after creation.
-func (m *TaskMgr) createTask(description string, background bool) (string, error) {
+func (m *TaskMgr) createTask(description string, background bool) (string, *adk.AsyncGenerator[*adk.AgentEvent], error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
 	if m.closed {
-		return "", fmt.Errorf("subagent: task manager is closed")
+		return "", nil, fmt.Errorf("subagent: task manager is closed")
 	}
 
 	m.seq++
 	id := "task_" + strconv.FormatInt(m.seq, 10)
+
+	eventIter, eventGen := adk.NewAsyncIteratorPair[*adk.AgentEvent]()
 
 	rec := &taskRecord{
 		task: Task{
@@ -385,10 +432,16 @@ func (m *TaskMgr) createTask(description string, background bool) (string, error
 			RunInBackground: background,
 			CreatedAt:       time.Now(),
 		},
+		eventGen: eventGen,
 	}
 	m.tasks[id] = rec
 
-	return id, nil
+	m.sendNotificationLocked(&Notification{
+		Task:   cloneTask(&rec.task),
+		Events: eventIter,
+	})
+
+	return id, eventGen, nil
 }
 
 // storeCancelFunc saves the AgentCancelFunc for a running task.
@@ -433,7 +486,7 @@ func (m *TaskMgr) failTask(id string, err error) {
 // Must be called with m.mu held.
 func (m *TaskMgr) cancelTask(rec *taskRecord) {
 	if rec.cancel != nil {
-		rec.cancel()
+		rec.cancel(adk.WithAgentCancelMode(adk.CancelImmediate))
 	}
 
 	m.finalize(rec.task.ID, func(rec *taskRecord) {
@@ -456,12 +509,15 @@ func (m *TaskMgr) finalize(id string, apply func(rec *taskRecord)) bool {
 	rec.task.DoneAt = &now
 	apply(rec)
 
+	// Close event generator — subscriber's Events iterator will see EOF.
+	if rec.eventGen != nil {
+		rec.eventGen.Close()
+	}
+
 	m.sendNotificationLocked(&Notification{Task: cloneTask(&rec.task)})
 	m.cond.Broadcast()
 	return true
 }
-
-// --- Internal helpers ---
 
 func (m *TaskMgr) getAgent(name string) (adk.Agent, bool) {
 	m.mu.Lock()
@@ -480,20 +536,20 @@ func (m *TaskMgr) hasRunningLocked() bool {
 	return false
 }
 
-// sendNotificationLocked sends a notification on the buffered channel.
-// Must be called with m.mu held. Uses non-blocking send to avoid deadlock.
+// sendNotificationLocked sends a notification to the subscriber if present.
+// Uses TrySend to avoid panic if the buffer is already closed.
+// Must be called with m.mu held.
 func (m *TaskMgr) sendNotificationLocked(n *Notification) {
-	select {
-	case m.notifications <- n:
-	default:
+	if m.notifyBuf != nil {
+		m.notifyBuf.TrySend(n)
 	}
 }
 
 // drainEvents consumes all events from the iterator and returns the final message content.
 // It closes intermediate MessageStreams to prevent resource leaks.
-// This replicates the relevant subset of agentTool.InvokableRun's event loop
-// (without InternalAgentEvents forwarding or interrupt handling).
-func drainEvents(iter *adk.AsyncIterator[*adk.AgentEvent]) (string, error) {
+// When gen is non-nil, each event is copied and forwarded to the generator,
+// enabling subscribers to stream agent events in real time.
+func drainEvents(iter *adk.AsyncIterator[*adk.AgentEvent], gen *adk.AsyncGenerator[*adk.AgentEvent]) (string, error) {
 	var lastEvent *adk.AgentEvent
 	for {
 		event, ok := iter.Next()
@@ -511,6 +567,13 @@ func drainEvents(iter *adk.AsyncIterator[*adk.AgentEvent]) (string, error) {
 
 		if event.Err != nil {
 			return "", event.Err
+		}
+
+		// Forward event to subscriber.
+		if gen != nil {
+			tmp := adk.CopyAgentEvent(event)
+			gen.Send(event)
+			event = tmp
 		}
 
 		lastEvent = event

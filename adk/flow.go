@@ -499,9 +499,7 @@ func (a *flowAgent) run(
 			// copy before adding to session because once added to session it's stream could be consumed by genAgentInput at any time
 			// interrupt action are not added to session, because ALL information contained in it
 			// is either presented to end-user, or made available to agents through other means
-			copied := copyAgentEvent(event)
-			setAutomaticClose(copied)
-			setAutomaticClose(event)
+			copied := CopyAgentEvent(event)
 			runCtx.Session.addEvent(copied)
 		}
 		// Action gating uses exact run-path match as well:
@@ -510,9 +508,7 @@ func (a *flowAgent) run(
 		if exactRunPathMatch(runCtx.RunPath, event.RunPath) {
 			lastAction = event.Action
 		}
-		copied := copyAgentEvent(event)
-		setAutomaticClose(copied)
-		setAutomaticClose(event)
+		copied := CopyAgentEvent(event)
 		cbGen.Send(copied)
 		generator.Send(event)
 	}
@@ -582,7 +578,7 @@ func wrapIterWithOnEnd(ctx context.Context, iter *AsyncIterator[*AgentEvent]) *A
 			if !ok {
 				break
 			}
-			copied := copyAgentEvent(event)
+			copied := CopyAgentEvent(event)
 			cbGen.Send(copied)
 			outGen.Send(event)
 		}
