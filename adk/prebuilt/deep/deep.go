@@ -177,15 +177,17 @@ func buildSubAgentsList(ctx context.Context, cfg *Config, instruction string, ha
 			Chinese: generalAgentDescriptionChinese,
 		})
 		generalAgent, err := adk.NewChatModelAgent(ctx, &adk.ChatModelAgentConfig{
-			Name:          generalAgentName,
-			Description:   agentDesc,
-			Instruction:   instruction,
-			Model:         cfg.ChatModel,
-			ToolsConfig:   cfg.ToolsConfig,
-			MaxIterations: cfg.MaxIteration,
-			Middlewares:   cfg.Middlewares,
-			Handlers:      append(handlers, cfg.Handlers...),
-			GenModelInput: genModelInput,
+			Name:                generalAgentName,
+			Description:         agentDesc,
+			Instruction:         instruction,
+			Model:               cfg.ChatModel,
+			ToolsConfig:         cfg.ToolsConfig,
+			MaxIterations:       cfg.MaxIteration,
+			Middlewares:         cfg.Middlewares,
+			Handlers:            append(handlers, cfg.Handlers...),
+			GenModelInput:       genModelInput,
+			ModelRetryConfig:    cfg.ModelRetryConfig,
+			ModelFailoverConfig: cfg.ModelFailoverConfig,
 		})
 		if err != nil {
 			return nil, err
