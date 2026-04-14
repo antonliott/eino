@@ -17,10 +17,13 @@
 package permission
 
 import (
+	"bytes"
 	"context"
+	"encoding/gob"
 	"errors"
 	"fmt"
 	"io"
+	"sync"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -379,4 +382,165 @@ func TestResumeResponse_Denied(t *testing.T) {
 	}
 	assert.False(t, resp.Approved)
 	assert.Equal(t, "user rejected", resp.DenyMessage)
+}
+
+func TestAttack_NilBeforeToolCall(t *testing.T) {
+	m := NewMiddleware(nil)
+	require.NotNil(t, m)
+
+	tCtx := &adk.ToolContext{Name: "SomeTool", CallID: "call_nil"}
+	assert.Panics(t, func() {
+		_, _ = m.permissionGate(context.Background(), tCtx, `{}`)
+	})
+}
+
+func TestAttack_EmptyDenyMessage(t *testing.T) {
+	result := formatDenyResult("WriteTool", "")
+	assert.Equal(t, "Permission denied for tool WriteTool: ", result)
+
+	m := NewMiddleware(func(ctx context.Context, toolName, args string) (*ToolCallDecision, error) {
+		return &ToolCallDecision{Decision: Deny, Message: ""}, nil
+	})
+
+	tCtx := &adk.ToolContext{Name: "WriteTool", CallID: "call_empty_deny"}
+	gr, err := m.permissionGate(context.Background(), tCtx, `{}`)
+	require.NoError(t, err)
+	assert.False(t, gr.allowed)
+	assert.Equal(t, "Permission denied for tool WriteTool: ", gr.denyResult)
+}
+
+func TestAttack_DenyWithEmptyToolName(t *testing.T) {
+	m := NewMiddleware(func(ctx context.Context, toolName, args string) (*ToolCallDecision, error) {
+		assert.Equal(t, "", toolName)
+		return &ToolCallDecision{Decision: Deny, Message: "no name"}, nil
+	})
+
+	tCtx := &adk.ToolContext{Name: "", CallID: "call_empty_name"}
+	gr, err := m.permissionGate(context.Background(), tCtx, `{"x":1}`)
+	require.NoError(t, err)
+	assert.False(t, gr.allowed)
+	assert.Equal(t, "Permission denied for tool : no name", gr.denyResult)
+}
+
+func TestAttack_AllowUpdatedInputEmpty(t *testing.T) {
+	m := NewMiddleware(func(ctx context.Context, toolName, args string) (*ToolCallDecision, error) {
+		return &ToolCallDecision{Decision: Allow, UpdatedInput: ""}, nil
+	})
+
+	originalArgs := `{"important":"data"}`
+	tCtx := &adk.ToolContext{Name: "MyTool", CallID: "call_empty_update"}
+	gr, err := m.permissionGate(context.Background(), tCtx, originalArgs)
+	require.NoError(t, err)
+	assert.True(t, gr.allowed)
+	assert.Equal(t, originalArgs, gr.updatedInput)
+
+	var receivedArgs string
+	endpoint := adk.InvokableToolCallEndpoint(func(ctx context.Context, args string, opts ...tool.Option) (string, error) {
+		receivedArgs = args
+		return "ok", nil
+	})
+
+	wrapped, err := m.WrapInvokableToolCall(context.Background(), endpoint, tCtx)
+	require.NoError(t, err)
+
+	result, err := wrapped(context.Background(), originalArgs)
+	require.NoError(t, err)
+	assert.Equal(t, "ok", result)
+	assert.Equal(t, originalArgs, receivedArgs)
+}
+
+func TestAttack_AskInfoGobSerializable(t *testing.T) {
+	info := &AskInfo{
+		ToolName:  "DangerTool",
+		CallID:    "call_gob",
+		Arguments: `{"rm":"-rf /"}`,
+		Message:   "are you sure?",
+	}
+	state := &AskState{Info: info}
+
+	var buf bytes.Buffer
+	require.NoError(t, gob.NewEncoder(&buf).Encode(info))
+
+	var decodedInfo AskInfo
+	require.NoError(t, gob.NewDecoder(&buf).Decode(&decodedInfo))
+	assert.Equal(t, info.ToolName, decodedInfo.ToolName)
+	assert.Equal(t, info.CallID, decodedInfo.CallID)
+	assert.Equal(t, info.Arguments, decodedInfo.Arguments)
+	assert.Equal(t, info.Message, decodedInfo.Message)
+
+	buf.Reset()
+	require.NoError(t, gob.NewEncoder(&buf).Encode(state))
+
+	var decodedState AskState
+	require.NoError(t, gob.NewDecoder(&buf).Decode(&decodedState))
+	require.NotNil(t, decodedState.Info)
+	assert.Equal(t, info.ToolName, decodedState.Info.ToolName)
+	assert.Equal(t, info.CallID, decodedState.Info.CallID)
+	assert.Equal(t, info.Arguments, decodedState.Info.Arguments)
+	assert.Equal(t, info.Message, decodedState.Info.Message)
+}
+
+func TestAttack_ResumeResponseEmptyUpdatedInput(t *testing.T) {
+	m := NewMiddleware(func(ctx context.Context, toolName, args string) (*ToolCallDecision, error) {
+		return &ToolCallDecision{Decision: Ask, Message: "confirm?"}, nil
+	})
+
+	originalArgs := `{"critical":"payload"}`
+	tCtx := &adk.ToolContext{Name: "CriticalTool", CallID: "call_resume_empty"}
+
+	ctx := makeCtxWithAddr()
+	gr, err := m.permissionGate(ctx, tCtx, originalArgs)
+	assert.Nil(t, gr)
+	require.Error(t, err)
+	var is *core.InterruptSignal
+	require.True(t, errors.As(err, &is))
+
+	resp := &ResumeResponse{Approved: true, UpdatedInput: ""}
+	assert.True(t, resp.Approved)
+	assert.Equal(t, "", resp.UpdatedInput)
+}
+
+func TestAttack_ConcurrentBeforeToolCall(t *testing.T) {
+	m := NewMiddleware(func(ctx context.Context, toolName, args string) (*ToolCallDecision, error) {
+		return &ToolCallDecision{Decision: Allow}, nil
+	})
+
+	var receivedMu sync.Mutex
+	received := make(map[string]string)
+
+	endpoint := adk.InvokableToolCallEndpoint(func(ctx context.Context, args string, opts ...tool.Option) (string, error) {
+		receivedMu.Lock()
+		received[args] = "done"
+		receivedMu.Unlock()
+		return "result:" + args, nil
+	})
+
+	tCtx := &adk.ToolContext{Name: "ConcurrentTool", CallID: "call_concurrent"}
+	wrapped, err := m.WrapInvokableToolCall(context.Background(), endpoint, tCtx)
+	require.NoError(t, err)
+
+	const goroutines = 50
+	var wg sync.WaitGroup
+	wg.Add(goroutines)
+	errs := make([]error, goroutines)
+	results := make([]string, goroutines)
+
+	for i := 0; i < goroutines; i++ {
+		go func(idx int) {
+			defer wg.Done()
+			args := fmt.Sprintf(`{"id":%d}`, idx)
+			results[idx], errs[idx] = wrapped(context.Background(), args)
+		}(i)
+	}
+	wg.Wait()
+
+	for i := 0; i < goroutines; i++ {
+		assert.NoError(t, errs[i], "goroutine %d returned error", i)
+		expected := fmt.Sprintf(`result:{"id":%d}`, i)
+		assert.Equal(t, expected, results[i], "goroutine %d result mismatch", i)
+	}
+
+	receivedMu.Lock()
+	assert.Len(t, received, goroutines)
+	receivedMu.Unlock()
 }
