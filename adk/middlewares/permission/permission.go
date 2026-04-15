@@ -51,11 +51,13 @@ type ToolCallDecision struct {
 
 // Checker is the user-provided evaluation function invoked before each tool call.
 // It receives the full ToolContext (including tool name and call ID) along with
-// the raw JSON arguments, and returns a ToolCallDecision that determines whether
-// the call is allowed, denied, or requires interactive approval.
-// Returning an error signals an infrastructure failure and aborts the agent loop;
-// permission denials should use Decision: Deny instead.
-type Checker func(ctx context.Context, tCtx *adk.ToolContext, argumentsInJSON string) (*ToolCallDecision, error)
+// the tool arguments as a *schema.ToolArgument, and returns a ToolCallDecision
+// that determines whether the call is allowed, denied, or requires interactive
+// approval. Using *schema.ToolArgument instead of a raw string ensures
+// forward-compatibility when the struct gains additional fields (e.g. multimodal
+// content). Returning an error signals an infrastructure failure and aborts the
+// agent loop; permission denials should use Decision: Deny instead.
+type Checker func(ctx context.Context, tCtx *adk.ToolContext, args *schema.ToolArgument) (*ToolCallDecision, error)
 
 type AskInfo struct {
 	ToolName  string
@@ -123,7 +125,7 @@ func (m *Middleware) permissionGate(
 				"via ResumeWithParams", tCtx.Name, tCtx.CallID)
 	}
 
-	decision, err := m.checker(ctx, tCtx, argumentsInJSON)
+	decision, err := m.checker(ctx, tCtx, &schema.ToolArgument{Text: argumentsInJSON})
 	if err != nil {
 		return nil, fmt.Errorf(
 			"permission: checker error for tool %q (call_id=%s, args=%s): %w",
