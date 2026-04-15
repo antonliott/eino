@@ -134,45 +134,70 @@ func streamToolMessageToAgenticMessage(input *schema.StreamReader[[]*schema.Mess
 func messageInputPartsToContentBlocks(parts []schema.MessageInputPart) []*schema.ContentBlock {
 	blocks := make([]*schema.ContentBlock, 0, len(parts))
 	for _, p := range parts {
+		var block *schema.ContentBlock
 		switch p.Type {
 		case schema.ChatMessagePartTypeText:
-			blocks = append(blocks, schema.NewContentBlock(&schema.UserInputText{Text: p.Text}))
+			block = schema.NewContentBlock(&schema.UserInputText{Text: p.Text})
+			block.Extra = p.Extra
 		case schema.ChatMessagePartTypeImageURL:
 			if p.Image != nil {
-				blocks = append(blocks, schema.NewContentBlock(&schema.UserInputImage{
+				block = schema.NewContentBlock(&schema.UserInputImage{
 					URL:        derefString(p.Image.URL),
 					Base64Data: derefString(p.Image.Base64Data),
 					MIMEType:   p.Image.MIMEType,
 					Detail:     p.Image.Detail,
-				}))
+				})
+				block.Extra = mergeExtra(p.Extra, p.Image.Extra)
 			}
 		case schema.ChatMessagePartTypeAudioURL:
 			if p.Audio != nil {
-				blocks = append(blocks, schema.NewContentBlock(&schema.UserInputAudio{
+				block = schema.NewContentBlock(&schema.UserInputAudio{
 					URL:        derefString(p.Audio.URL),
 					Base64Data: derefString(p.Audio.Base64Data),
 					MIMEType:   p.Audio.MIMEType,
-				}))
+				})
+				block.Extra = mergeExtra(p.Extra, p.Audio.Extra)
 			}
 		case schema.ChatMessagePartTypeVideoURL:
 			if p.Video != nil {
-				blocks = append(blocks, schema.NewContentBlock(&schema.UserInputVideo{
+				block = schema.NewContentBlock(&schema.UserInputVideo{
 					URL:        derefString(p.Video.URL),
 					Base64Data: derefString(p.Video.Base64Data),
 					MIMEType:   p.Video.MIMEType,
-				}))
+				})
+				block.Extra = mergeExtra(p.Extra, p.Video.Extra)
 			}
 		case schema.ChatMessagePartTypeFileURL:
 			if p.File != nil {
-				blocks = append(blocks, schema.NewContentBlock(&schema.UserInputFile{
+				block = schema.NewContentBlock(&schema.UserInputFile{
 					URL:        derefString(p.File.URL),
 					Base64Data: derefString(p.File.Base64Data),
+					Name:       p.File.Name,
 					MIMEType:   p.File.MIMEType,
-				}))
+				})
+				block.Extra = mergeExtra(p.Extra, p.File.Extra)
 			}
+		}
+		if block != nil {
+			blocks = append(blocks, block)
 		}
 	}
 	return blocks
+}
+
+// mergeExtra merges two extra maps. Values in b take precedence over a.
+func mergeExtra(a, b map[string]any) map[string]any {
+	if len(a) == 0 && len(b) == 0 {
+		return nil
+	}
+	merged := make(map[string]any, len(a)+len(b))
+	for k, v := range a {
+		merged[k] = v
+	}
+	for k, v := range b {
+		merged[k] = v
+	}
+	return merged
 }
 
 func derefString(s *string) string {

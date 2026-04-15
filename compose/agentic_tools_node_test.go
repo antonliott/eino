@@ -260,6 +260,52 @@ func TestMessageInputPartsToContentBlocks(t *testing.T) {
 		blocks := messageInputPartsToContentBlocks(nil)
 		assert.Equal(t, 0, len(blocks))
 	})
+
+	t.Run("extra merge - part and media type", func(t *testing.T) {
+		imgURL := "https://example.com/img.png"
+		input := []schema.MessageInputPart{
+			{
+				Type: schema.ChatMessagePartTypeImageURL,
+				Image: &schema.MessageInputImage{
+					MessagePartCommon: schema.MessagePartCommon{
+						URL:  &imgURL,
+						Extra: map[string]any{"shared": "from_common", "common_only": "c"},
+					},
+				},
+				Extra: map[string]any{"shared": "from_part", "part_only": "p"},
+			},
+		}
+		blocks := messageInputPartsToContentBlocks(input)
+		assert.Equal(t, 1, len(blocks))
+		// media-type Extra takes precedence
+		assert.Equal(t, "from_common", blocks[0].Extra["shared"])
+		assert.Equal(t, "p", blocks[0].Extra["part_only"])
+		assert.Equal(t, "c", blocks[0].Extra["common_only"])
+	})
+
+	t.Run("extra - text only has part extra", func(t *testing.T) {
+		input := []schema.MessageInputPart{
+			{
+				Type:  schema.ChatMessagePartTypeText,
+				Text:  "hello",
+				Extra: map[string]any{"key": "val"},
+			},
+		}
+		blocks := messageInputPartsToContentBlocks(input)
+		assert.Equal(t, map[string]any{"key": "val"}, blocks[0].Extra)
+	})
+
+	t.Run("extra - both nil returns nil", func(t *testing.T) {
+		imgURL := "https://example.com/img.png"
+		input := []schema.MessageInputPart{
+			{
+				Type:  schema.ChatMessagePartTypeImageURL,
+				Image: &schema.MessageInputImage{MessagePartCommon: schema.MessagePartCommon{URL: &imgURL}},
+			},
+		}
+		blocks := messageInputPartsToContentBlocks(input)
+		assert.Nil(t, blocks[0].Extra)
+	})
 }
 
 func TestStreamToolMessageToAgenticMessage(t *testing.T) {
