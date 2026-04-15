@@ -35,14 +35,14 @@ import (
 	"github.com/cloudwego/eino/schema"
 )
 
-func TestNewMiddleware(t *testing.T) {
+func TestNew(t *testing.T) {
 	called := false
-	m := NewMiddleware(func(ctx context.Context, toolName, args string) (*ToolCallDecision, error) {
+	m := New(func(ctx context.Context, tCtx *adk.ToolContext, argumentsInJSON string) (*ToolCallDecision, error) {
 		called = true
 		return &ToolCallDecision{Decision: Allow}, nil
 	})
 	assert.NotNil(t, m)
-	assert.NotNil(t, m.beforeToolCall)
+	assert.NotNil(t, m.checker)
 	assert.NotNil(t, m.BaseChatModelAgentMiddleware)
 	assert.False(t, called)
 }
@@ -58,9 +58,9 @@ func makeCtxWithAddr() context.Context {
 }
 
 func TestPermissionGate_Allow(t *testing.T) {
-	m := NewMiddleware(func(ctx context.Context, toolName, args string) (*ToolCallDecision, error) {
-		assert.Equal(t, "ReadFile", toolName)
-		assert.Equal(t, `{"path":"/tmp/x"}`, args)
+	m := New(func(ctx context.Context, tCtx *adk.ToolContext, argumentsInJSON string) (*ToolCallDecision, error) {
+		assert.Equal(t, "ReadFile", tCtx.Name)
+		assert.Equal(t, `{"path":"/tmp/x"}`, argumentsInJSON)
 		return &ToolCallDecision{Decision: Allow, Reason: "read-only"}, nil
 	})
 
@@ -72,7 +72,7 @@ func TestPermissionGate_Allow(t *testing.T) {
 }
 
 func TestPermissionGate_AllowWithUpdatedInput(t *testing.T) {
-	m := NewMiddleware(func(ctx context.Context, toolName, args string) (*ToolCallDecision, error) {
+	m := New(func(ctx context.Context, tCtx *adk.ToolContext, argumentsInJSON string) (*ToolCallDecision, error) {
 		return &ToolCallDecision{
 			Decision:     Allow,
 			UpdatedInput: `{"path":"/tmp/safe"}`,
@@ -87,7 +87,7 @@ func TestPermissionGate_AllowWithUpdatedInput(t *testing.T) {
 }
 
 func TestPermissionGate_Deny(t *testing.T) {
-	m := NewMiddleware(func(ctx context.Context, toolName, args string) (*ToolCallDecision, error) {
+	m := New(func(ctx context.Context, tCtx *adk.ToolContext, argumentsInJSON string) (*ToolCallDecision, error) {
 		return &ToolCallDecision{
 			Decision: Deny,
 			Message:  "operation not allowed",
@@ -103,7 +103,7 @@ func TestPermissionGate_Deny(t *testing.T) {
 }
 
 func TestPermissionGate_Ask(t *testing.T) {
-	m := NewMiddleware(func(ctx context.Context, toolName, args string) (*ToolCallDecision, error) {
+	m := New(func(ctx context.Context, tCtx *adk.ToolContext, argumentsInJSON string) (*ToolCallDecision, error) {
 		return &ToolCallDecision{
 			Decision: Ask,
 			Message:  "requires approval",
@@ -121,7 +121,7 @@ func TestPermissionGate_Ask(t *testing.T) {
 }
 
 func TestPermissionGate_UnknownDecision(t *testing.T) {
-	m := NewMiddleware(func(ctx context.Context, toolName, args string) (*ToolCallDecision, error) {
+	m := New(func(ctx context.Context, tCtx *adk.ToolContext, argumentsInJSON string) (*ToolCallDecision, error) {
 		return &ToolCallDecision{Decision: "maybe"}, nil
 	})
 
@@ -134,7 +134,7 @@ func TestPermissionGate_UnknownDecision(t *testing.T) {
 }
 
 func TestPermissionGate_NilDecision(t *testing.T) {
-	m := NewMiddleware(func(ctx context.Context, toolName, args string) (*ToolCallDecision, error) {
+	m := New(func(ctx context.Context, tCtx *adk.ToolContext, argumentsInJSON string) (*ToolCallDecision, error) {
 		return nil, nil
 	})
 
@@ -142,11 +142,11 @@ func TestPermissionGate_NilDecision(t *testing.T) {
 	result, err := m.permissionGate(context.Background(), tCtx, `{}`)
 	assert.Nil(t, result)
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "nil decision")
+	assert.Contains(t, err.Error(), "nil ToolCallDecision")
 }
 
 func TestPermissionGate_BeforeToolCallError(t *testing.T) {
-	m := NewMiddleware(func(ctx context.Context, toolName, args string) (*ToolCallDecision, error) {
+	m := New(func(ctx context.Context, tCtx *adk.ToolContext, argumentsInJSON string) (*ToolCallDecision, error) {
 		return nil, fmt.Errorf("rule store unreachable")
 	})
 
@@ -154,13 +154,13 @@ func TestPermissionGate_BeforeToolCallError(t *testing.T) {
 	result, err := m.permissionGate(context.Background(), tCtx, `{}`)
 	assert.Nil(t, result)
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "permission check failed")
+	assert.Contains(t, err.Error(), "permission: checker error")
 	assert.Contains(t, err.Error(), "rule store unreachable")
 }
 
 func TestWrapInvokableToolCall_Allow(t *testing.T) {
 	endpointCalled := false
-	m := NewMiddleware(func(ctx context.Context, toolName, args string) (*ToolCallDecision, error) {
+	m := New(func(ctx context.Context, tCtx *adk.ToolContext, argumentsInJSON string) (*ToolCallDecision, error) {
 		return &ToolCallDecision{Decision: Allow}, nil
 	})
 
@@ -180,7 +180,7 @@ func TestWrapInvokableToolCall_Allow(t *testing.T) {
 }
 
 func TestWrapInvokableToolCall_AllowWithUpdatedInput(t *testing.T) {
-	m := NewMiddleware(func(ctx context.Context, toolName, args string) (*ToolCallDecision, error) {
+	m := New(func(ctx context.Context, tCtx *adk.ToolContext, argumentsInJSON string) (*ToolCallDecision, error) {
 		return &ToolCallDecision{Decision: Allow, UpdatedInput: `{"sanitized":true}`}, nil
 	})
 
@@ -202,7 +202,7 @@ func TestWrapInvokableToolCall_AllowWithUpdatedInput(t *testing.T) {
 
 func TestWrapInvokableToolCall_Deny(t *testing.T) {
 	endpointCalled := false
-	m := NewMiddleware(func(ctx context.Context, toolName, args string) (*ToolCallDecision, error) {
+	m := New(func(ctx context.Context, tCtx *adk.ToolContext, argumentsInJSON string) (*ToolCallDecision, error) {
 		return &ToolCallDecision{Decision: Deny, Message: "blocked"}, nil
 	})
 
@@ -222,7 +222,7 @@ func TestWrapInvokableToolCall_Deny(t *testing.T) {
 }
 
 func TestWrapInvokableToolCall_Ask(t *testing.T) {
-	m := NewMiddleware(func(ctx context.Context, toolName, args string) (*ToolCallDecision, error) {
+	m := New(func(ctx context.Context, tCtx *adk.ToolContext, argumentsInJSON string) (*ToolCallDecision, error) {
 		return &ToolCallDecision{Decision: Ask, Message: "need approval"}, nil
 	})
 
@@ -244,7 +244,7 @@ func TestWrapInvokableToolCall_Ask(t *testing.T) {
 }
 
 func TestWrapStreamableToolCall_Allow(t *testing.T) {
-	m := NewMiddleware(func(ctx context.Context, toolName, args string) (*ToolCallDecision, error) {
+	m := New(func(ctx context.Context, tCtx *adk.ToolContext, argumentsInJSON string) (*ToolCallDecision, error) {
 		return &ToolCallDecision{Decision: Allow}, nil
 	})
 
@@ -273,7 +273,7 @@ func TestWrapStreamableToolCall_Allow(t *testing.T) {
 
 func TestWrapStreamableToolCall_Deny(t *testing.T) {
 	endpointCalled := false
-	m := NewMiddleware(func(ctx context.Context, toolName, args string) (*ToolCallDecision, error) {
+	m := New(func(ctx context.Context, tCtx *adk.ToolContext, argumentsInJSON string) (*ToolCallDecision, error) {
 		return &ToolCallDecision{Decision: Deny, Message: "stream blocked"}, nil
 	})
 
@@ -300,7 +300,7 @@ func TestWrapStreamableToolCall_Deny(t *testing.T) {
 }
 
 func TestWrapStreamableToolCall_Ask(t *testing.T) {
-	m := NewMiddleware(func(ctx context.Context, toolName, args string) (*ToolCallDecision, error) {
+	m := New(func(ctx context.Context, tCtx *adk.ToolContext, argumentsInJSON string) (*ToolCallDecision, error) {
 		return &ToolCallDecision{Decision: Ask, Message: "stream needs approval"}, nil
 	})
 
@@ -322,7 +322,7 @@ func TestWrapStreamableToolCall_Ask(t *testing.T) {
 }
 
 func TestWrapInvokableToolCall_BeforeToolCallError(t *testing.T) {
-	m := NewMiddleware(func(ctx context.Context, toolName, args string) (*ToolCallDecision, error) {
+	m := New(func(ctx context.Context, tCtx *adk.ToolContext, argumentsInJSON string) (*ToolCallDecision, error) {
 		return nil, fmt.Errorf("infra failure")
 	})
 
@@ -337,11 +337,11 @@ func TestWrapInvokableToolCall_BeforeToolCallError(t *testing.T) {
 	result, err := wrapped(context.Background(), `{}`)
 	assert.Equal(t, "", result)
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "permission check failed")
+	assert.Contains(t, err.Error(), "permission: checker error")
 }
 
 func TestMiddleware_ImplementsInterface(t *testing.T) {
-	m := NewMiddleware(func(ctx context.Context, toolName, args string) (*ToolCallDecision, error) {
+	m := New(func(ctx context.Context, tCtx *adk.ToolContext, argumentsInJSON string) (*ToolCallDecision, error) {
 		return &ToolCallDecision{Decision: Allow}, nil
 	})
 	var _ adk.ChatModelAgentMiddleware = m
@@ -385,7 +385,7 @@ func TestResumeResponse_Denied(t *testing.T) {
 }
 
 func TestAttack_NilBeforeToolCall(t *testing.T) {
-	m := NewMiddleware(nil)
+	m := New(nil)
 	require.NotNil(t, m)
 
 	tCtx := &adk.ToolContext{Name: "SomeTool", CallID: "call_nil"}
@@ -398,7 +398,7 @@ func TestAttack_EmptyDenyMessage(t *testing.T) {
 	result := formatDenyResult("WriteTool", "")
 	assert.Equal(t, "Permission denied for tool WriteTool: ", result)
 
-	m := NewMiddleware(func(ctx context.Context, toolName, args string) (*ToolCallDecision, error) {
+	m := New(func(ctx context.Context, tCtx *adk.ToolContext, argumentsInJSON string) (*ToolCallDecision, error) {
 		return &ToolCallDecision{Decision: Deny, Message: ""}, nil
 	})
 
@@ -410,8 +410,8 @@ func TestAttack_EmptyDenyMessage(t *testing.T) {
 }
 
 func TestAttack_DenyWithEmptyToolName(t *testing.T) {
-	m := NewMiddleware(func(ctx context.Context, toolName, args string) (*ToolCallDecision, error) {
-		assert.Equal(t, "", toolName)
+	m := New(func(ctx context.Context, tCtx *adk.ToolContext, argumentsInJSON string) (*ToolCallDecision, error) {
+		assert.Equal(t, "", tCtx.Name)
 		return &ToolCallDecision{Decision: Deny, Message: "no name"}, nil
 	})
 
@@ -423,7 +423,7 @@ func TestAttack_DenyWithEmptyToolName(t *testing.T) {
 }
 
 func TestAttack_AllowUpdatedInputEmpty(t *testing.T) {
-	m := NewMiddleware(func(ctx context.Context, toolName, args string) (*ToolCallDecision, error) {
+	m := New(func(ctx context.Context, tCtx *adk.ToolContext, argumentsInJSON string) (*ToolCallDecision, error) {
 		return &ToolCallDecision{Decision: Allow, UpdatedInput: ""}, nil
 	})
 
@@ -481,7 +481,7 @@ func TestAttack_AskInfoGobSerializable(t *testing.T) {
 }
 
 func TestAttack_ResumeResponseEmptyUpdatedInput(t *testing.T) {
-	m := NewMiddleware(func(ctx context.Context, toolName, args string) (*ToolCallDecision, error) {
+	m := New(func(ctx context.Context, tCtx *adk.ToolContext, argumentsInJSON string) (*ToolCallDecision, error) {
 		return &ToolCallDecision{Decision: Ask, Message: "confirm?"}, nil
 	})
 
@@ -501,7 +501,7 @@ func TestAttack_ResumeResponseEmptyUpdatedInput(t *testing.T) {
 }
 
 func TestAttack_ConcurrentBeforeToolCall(t *testing.T) {
-	m := NewMiddleware(func(ctx context.Context, toolName, args string) (*ToolCallDecision, error) {
+	m := New(func(ctx context.Context, tCtx *adk.ToolContext, argumentsInJSON string) (*ToolCallDecision, error) {
 		return &ToolCallDecision{Decision: Allow}, nil
 	})
 
@@ -543,4 +543,126 @@ func TestAttack_ConcurrentBeforeToolCall(t *testing.T) {
 	receivedMu.Lock()
 	assert.Len(t, received, goroutines)
 	receivedMu.Unlock()
+}
+
+func buildResumeCtx(
+	t *testing.T,
+	signal *core.InterruptSignal,
+	resumeData map[string]any,
+) context.Context {
+	t.Helper()
+	id2Addr, id2State := core.SignalToPersistenceMaps(signal)
+	ctx := context.Background()
+	ctx = core.PopulateInterruptState(ctx, id2Addr, id2State)
+	ctx = core.BatchResumeWithData(ctx, resumeData)
+	ctx = core.AppendAddressSegment(ctx, "agent", "test-agent", "")
+	return ctx
+}
+
+func TestE2E_AskThenResumeApproved(t *testing.T) {
+	m := New(func(ctx context.Context, tCtx *adk.ToolContext, argumentsInJSON string) (*ToolCallDecision, error) {
+		return &ToolCallDecision{Decision: Ask, Message: "approve rm?"}, nil
+	})
+
+	tCtx := &adk.ToolContext{Name: "ShellExec", CallID: "call_e2e_1"}
+	originalArgs := `{"cmd":"rm -rf /"}`
+
+	ctx := makeCtxWithAddr()
+	result, err := m.permissionGate(ctx, tCtx, originalArgs)
+	assert.Nil(t, result)
+	require.Error(t, err)
+
+	var signal *core.InterruptSignal
+	require.True(t, errors.As(err, &signal))
+	assert.Equal(t, originalArgs, signal.InterruptState.State.(*AskState).Info.Arguments)
+
+	resumeCtx := buildResumeCtx(t, signal, map[string]any{
+		signal.ID: &ResumeResponse{Approved: true},
+	})
+
+	result, err = m.permissionGate(resumeCtx, tCtx, originalArgs)
+	require.NoError(t, err)
+	assert.True(t, result.allowed)
+	assert.Equal(t, originalArgs, result.updatedInput)
+}
+
+func TestE2E_AskThenResumeDenied(t *testing.T) {
+	m := New(func(ctx context.Context, tCtx *adk.ToolContext, argumentsInJSON string) (*ToolCallDecision, error) {
+		return &ToolCallDecision{Decision: Ask, Message: "dangerous"}, nil
+	})
+
+	tCtx := &adk.ToolContext{Name: "DeleteDB", CallID: "call_e2e_deny"}
+	ctx := makeCtxWithAddr()
+
+	_, err := m.permissionGate(ctx, tCtx, `{}`)
+	require.Error(t, err)
+
+	var signal *core.InterruptSignal
+	require.True(t, errors.As(err, &signal))
+
+	resumeCtx := buildResumeCtx(t, signal, map[string]any{
+		signal.ID: &ResumeResponse{Approved: false, DenyMessage: "user said no"},
+	})
+
+	result, err := m.permissionGate(resumeCtx, tCtx, `{}`)
+	require.NoError(t, err)
+	assert.False(t, result.allowed)
+	assert.Contains(t, result.denyResult, "user said no")
+}
+
+func TestE2E_ReInterruptNonTargetTool(t *testing.T) {
+	m := New(func(ctx context.Context, tCtx *adk.ToolContext, argumentsInJSON string) (*ToolCallDecision, error) {
+		return &ToolCallDecision{Decision: Ask, Message: "confirm"}, nil
+	})
+
+	tCtx := &adk.ToolContext{Name: "ToolA", CallID: "call_a"}
+	ctx := makeCtxWithAddr()
+
+	_, err := m.permissionGate(ctx, tCtx, `{}`)
+	require.Error(t, err)
+
+	var signal *core.InterruptSignal
+	require.True(t, errors.As(err, &signal))
+
+	id2Addr, id2State := core.SignalToPersistenceMaps(signal)
+	resumeCtx := context.Background()
+	resumeCtx = core.PopulateInterruptState(resumeCtx, id2Addr, id2State)
+	resumeCtx = core.BatchResumeWithData(resumeCtx, map[string]any{
+		"some_other_id": &ResumeResponse{Approved: true},
+	})
+	resumeCtx = core.AppendAddressSegment(resumeCtx, "agent", "test-agent", "")
+
+	result, err := m.permissionGate(resumeCtx, tCtx, `{}`)
+	assert.Nil(t, result)
+	require.Error(t, err)
+
+	var reSignal *core.InterruptSignal
+	require.True(t, errors.As(err, &reSignal))
+	assert.Equal(t, "ToolA", reSignal.InterruptState.State.(*AskState).Info.ToolName)
+}
+
+func TestE2E_ResumeWithUpdatedInput(t *testing.T) {
+	m := New(func(ctx context.Context, tCtx *adk.ToolContext, argumentsInJSON string) (*ToolCallDecision, error) {
+		return &ToolCallDecision{Decision: Ask, Message: "sanitize?"}, nil
+	})
+
+	tCtx := &adk.ToolContext{Name: "WriteFile", CallID: "call_e2e_update"}
+	originalArgs := `{"path":"/etc/passwd","content":"hacked"}`
+
+	ctx := makeCtxWithAddr()
+	_, err := m.permissionGate(ctx, tCtx, originalArgs)
+	require.Error(t, err)
+
+	var signal *core.InterruptSignal
+	require.True(t, errors.As(err, &signal))
+
+	sanitizedArgs := `{"path":"/tmp/safe.txt","content":"ok"}`
+	resumeCtx := buildResumeCtx(t, signal, map[string]any{
+		signal.ID: &ResumeResponse{Approved: true, UpdatedInput: sanitizedArgs},
+	})
+
+	result, err := m.permissionGate(resumeCtx, tCtx, originalArgs)
+	require.NoError(t, err)
+	assert.True(t, result.allowed)
+	assert.Equal(t, sanitizedArgs, result.updatedInput)
 }

@@ -15,7 +15,7 @@
  */
 
 // Package permission provides a ChatModelAgentMiddleware that gates tool execution
-// behind a user-defined permission check (BeforeToolCall). It supports three decisions:
+// behind a user-defined permission check (Checker). It supports three decisions:
 // Allow (execute the tool), Deny (return a deny message as tool result), and Ask
 // (interrupt the agent loop via StatefulInterrupt for external approval).
 package permission
@@ -34,19 +34,14 @@ func init() {
 	schema.RegisterName[*AskState]("_eino_adk_permission_ask_state")
 }
 
-// Decision represents the outcome of a permission check.
 type Decision string
 
 const (
-	// Allow permits the tool to execute.
 	Allow Decision = "allow"
-	// Deny blocks the tool and returns a deny message as the tool result.
-	Deny Decision = "deny"
-	// Ask interrupts the agent loop to await external approval.
-	Ask Decision = "ask"
+	Deny  Decision = "deny"
+	Ask   Decision = "ask"
 )
 
-// ToolCallDecision is the result of a BeforeToolCall evaluation.
 type ToolCallDecision struct {
 	Decision     Decision
 	Message      string
@@ -54,14 +49,14 @@ type ToolCallDecision struct {
 	Reason       string
 }
 
-// BeforeToolCall is the user-provided evaluation function invoked before each tool call.
-// It returns a ToolCallDecision that determines whether the call is allowed, denied, or
-// requires interactive approval. Returning an error signals an infrastructure failure
-// and aborts the agent loop; permission denials should use Decision: Deny instead.
-type BeforeToolCall func(ctx context.Context, toolName string, argumentsInJSON string) (*ToolCallDecision, error)
+// Checker is the user-provided evaluation function invoked before each tool call.
+// It receives the full ToolContext (including tool name and call ID) along with
+// the raw JSON arguments, and returns a ToolCallDecision that determines whether
+// the call is allowed, denied, or requires interactive approval.
+// Returning an error signals an infrastructure failure and aborts the agent loop;
+// permission denials should use Decision: Deny instead.
+type Checker func(ctx context.Context, tCtx *adk.ToolContext, argumentsInJSON string) (*ToolCallDecision, error)
 
-// AskInfo is the interrupt info exposed to external consumers (UI / OnAgentEvents).
-// All fields are basic types to satisfy gob serialization requirements.
 type AskInfo struct {
 	ToolName  string
 	CallID    string
@@ -69,30 +64,26 @@ type AskInfo struct {
 	Message   string
 }
 
-// AskState is the interrupt state persisted via CheckPointStore (gob serialization).
 type AskState struct {
 	Info *AskInfo
 }
 
-// ResumeResponse is the decision injected externally via ResumeWithParams.
 type ResumeResponse struct {
 	Approved     bool
 	UpdatedInput string
 	DenyMessage  string
 }
 
-// Middleware is a ChatModelAgentMiddleware that gates tool execution behind
-// a user-defined BeforeToolCall permission check.
 type Middleware struct {
 	*adk.BaseChatModelAgentMiddleware
-	beforeToolCall BeforeToolCall
+	checker Checker
 }
 
-// NewMiddleware creates a new permission Middleware with the given BeforeToolCall evaluator.
-func NewMiddleware(beforeToolCall BeforeToolCall) *Middleware {
+// New creates a permission Middleware with the given Checker evaluator.
+func New(checker Checker) *Middleware {
 	return &Middleware{
 		BaseChatModelAgentMiddleware: &adk.BaseChatModelAgentMiddleware{},
-		beforeToolCall:               beforeToolCall,
+		checker:                      checker,
 	}
 }
 
@@ -126,15 +117,23 @@ func (m *Middleware) permissionGate(
 	}
 
 	if isTarget && !hasData {
-		return nil, fmt.Errorf("permission: tool %s was targeted for resume but received nil or type-mismatched ResumeResponse", tCtx.Name)
+		return nil, fmt.Errorf(
+			"permission: tool %q (call_id=%s) was targeted for resume but received nil "+
+				"or type-mismatched ResumeResponse; the caller must supply a *permission.ResumeResponse "+
+				"via ResumeWithParams", tCtx.Name, tCtx.CallID)
 	}
 
-	decision, err := m.beforeToolCall(ctx, tCtx.Name, argumentsInJSON)
+	decision, err := m.checker(ctx, tCtx, argumentsInJSON)
 	if err != nil {
-		return nil, fmt.Errorf("permission check failed: %w", err)
+		return nil, fmt.Errorf(
+			"permission: checker error for tool %q (call_id=%s, args=%s): %w",
+			tCtx.Name, tCtx.CallID, argumentsInJSON, err)
 	}
 	if decision == nil {
-		return nil, fmt.Errorf("permission: BeforeToolCall returned nil decision for tool %s", tCtx.Name)
+		return nil, fmt.Errorf(
+			"permission: checker returned nil ToolCallDecision for tool %q (call_id=%s); "+
+				"return a valid *ToolCallDecision with Decision set to Allow, Deny, or Ask",
+			tCtx.Name, tCtx.CallID)
 	}
 
 	switch decision.Decision {
@@ -160,11 +159,10 @@ func (m *Middleware) permissionGate(
 
 	default:
 		return &gateResult{denyResult: formatDenyResult(tCtx.Name,
-			fmt.Sprintf("unknown permission decision %q", decision.Decision))}, nil
+			fmt.Sprintf("unknown permission decision %q; expected allow, deny, or ask", decision.Decision))}, nil
 	}
 }
 
-// WrapInvokableToolCall intercepts synchronous tool calls with a permission gate.
 func (m *Middleware) WrapInvokableToolCall(
 	ctx context.Context,
 	endpoint adk.InvokableToolCallEndpoint,
@@ -182,7 +180,6 @@ func (m *Middleware) WrapInvokableToolCall(
 	}, nil
 }
 
-// WrapStreamableToolCall intercepts streaming tool calls with a permission gate.
 func (m *Middleware) WrapStreamableToolCall(
 	ctx context.Context,
 	endpoint adk.StreamableToolCallEndpoint,
@@ -194,10 +191,7 @@ func (m *Middleware) WrapStreamableToolCall(
 			return nil, err
 		}
 		if !result.allowed {
-			sr, sw := schema.Pipe[string](1)
-			sw.Send(result.denyResult, nil)
-			sw.Close()
-			return sr, nil
+			return schema.StreamReaderFromArray([]string{result.denyResult}), nil
 		}
 		return endpoint(ctx, result.updatedInput, opts...)
 	}, nil
