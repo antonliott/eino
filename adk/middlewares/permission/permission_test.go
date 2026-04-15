@@ -666,3 +666,211 @@ func TestE2E_ResumeWithUpdatedInput(t *testing.T) {
 	assert.True(t, result.allowed)
 	assert.Equal(t, sanitizedArgs, result.updatedInput)
 }
+
+// --- Enhanced Tool Call Endpoint Tests ---
+
+func TestWrapEnhancedInvokableToolCall_Allow(t *testing.T) {
+	endpointCalled := false
+	m := New(func(ctx context.Context, tCtx *adk.ToolContext, args *schema.ToolArgument) (*ToolCallDecision, error) {
+		assert.Equal(t, "EnhancedTool", tCtx.Name)
+		assert.Equal(t, `{"key":"val"}`, args.Text)
+		return &ToolCallDecision{Decision: Allow}, nil
+	})
+
+	originalEndpoint := adk.EnhancedInvokableToolCallEndpoint(
+		func(ctx context.Context, arg *schema.ToolArgument, opts ...tool.Option) (*schema.ToolResult, error) {
+			endpointCalled = true
+			return &schema.ToolResult{Parts: []schema.ToolOutputPart{
+				{Type: schema.ToolPartTypeText, Text: "enhanced:" + arg.Text},
+			}}, nil
+		})
+
+	tCtx := &adk.ToolContext{Name: "EnhancedTool", CallID: "call_ei_1"}
+	wrapped, err := m.WrapEnhancedInvokableToolCall(context.Background(), originalEndpoint, tCtx)
+	require.NoError(t, err)
+
+	result, err := wrapped(context.Background(), &schema.ToolArgument{Text: `{"key":"val"}`})
+	require.NoError(t, err)
+	assert.True(t, endpointCalled)
+	require.Len(t, result.Parts, 1)
+	assert.Equal(t, `enhanced:{"key":"val"}`, result.Parts[0].Text)
+}
+
+func TestWrapEnhancedInvokableToolCall_AllowWithUpdatedInput(t *testing.T) {
+	m := New(func(ctx context.Context, tCtx *adk.ToolContext, args *schema.ToolArgument) (*ToolCallDecision, error) {
+		return &ToolCallDecision{Decision: Allow, UpdatedInput: `{"sanitized":true}`}, nil
+	})
+
+	var receivedText string
+	originalEndpoint := adk.EnhancedInvokableToolCallEndpoint(
+		func(ctx context.Context, arg *schema.ToolArgument, opts ...tool.Option) (*schema.ToolResult, error) {
+			receivedText = arg.Text
+			return &schema.ToolResult{Parts: []schema.ToolOutputPart{
+				{Type: schema.ToolPartTypeText, Text: "ok"},
+			}}, nil
+		})
+
+	tCtx := &adk.ToolContext{Name: "EnhancedTool", CallID: "call_ei_2"}
+	wrapped, err := m.WrapEnhancedInvokableToolCall(context.Background(), originalEndpoint, tCtx)
+	require.NoError(t, err)
+
+	_, err = wrapped(context.Background(), &schema.ToolArgument{Text: `{"original":true}`})
+	require.NoError(t, err)
+	assert.Equal(t, `{"sanitized":true}`, receivedText)
+}
+
+func TestWrapEnhancedInvokableToolCall_Deny(t *testing.T) {
+	endpointCalled := false
+	m := New(func(ctx context.Context, tCtx *adk.ToolContext, args *schema.ToolArgument) (*ToolCallDecision, error) {
+		return &ToolCallDecision{Decision: Deny, Message: "enhanced blocked"}, nil
+	})
+
+	originalEndpoint := adk.EnhancedInvokableToolCallEndpoint(
+		func(ctx context.Context, arg *schema.ToolArgument, opts ...tool.Option) (*schema.ToolResult, error) {
+			endpointCalled = true
+			return nil, nil
+		})
+
+	tCtx := &adk.ToolContext{Name: "EnhancedTool", CallID: "call_ei_3"}
+	wrapped, err := m.WrapEnhancedInvokableToolCall(context.Background(), originalEndpoint, tCtx)
+	require.NoError(t, err)
+
+	result, err := wrapped(context.Background(), &schema.ToolArgument{Text: `{}`})
+	require.NoError(t, err)
+	assert.False(t, endpointCalled)
+	require.Len(t, result.Parts, 1)
+	assert.Equal(t, schema.ToolPartTypeText, result.Parts[0].Type)
+	assert.Equal(t, "Permission denied for tool EnhancedTool: enhanced blocked", result.Parts[0].Text)
+}
+
+func TestWrapEnhancedInvokableToolCall_Ask(t *testing.T) {
+	m := New(func(ctx context.Context, tCtx *adk.ToolContext, args *schema.ToolArgument) (*ToolCallDecision, error) {
+		return &ToolCallDecision{Decision: Ask, Message: "enhanced needs approval"}, nil
+	})
+
+	originalEndpoint := adk.EnhancedInvokableToolCallEndpoint(
+		func(ctx context.Context, arg *schema.ToolArgument, opts ...tool.Option) (*schema.ToolResult, error) {
+			return nil, nil
+		})
+
+	tCtx := &adk.ToolContext{Name: "EnhancedTool", CallID: "call_ei_4"}
+	wrapped, err := m.WrapEnhancedInvokableToolCall(context.Background(), originalEndpoint, tCtx)
+	require.NoError(t, err)
+
+	ctx := makeCtxWithAddr()
+	result, err := wrapped(ctx, &schema.ToolArgument{Text: `{}`})
+	assert.Nil(t, result)
+	require.Error(t, err)
+
+	var is *core.InterruptSignal
+	assert.True(t, errors.As(err, &is))
+}
+
+func TestWrapEnhancedStreamableToolCall_Allow(t *testing.T) {
+	m := New(func(ctx context.Context, tCtx *adk.ToolContext, args *schema.ToolArgument) (*ToolCallDecision, error) {
+		return &ToolCallDecision{Decision: Allow}, nil
+	})
+
+	originalEndpoint := adk.EnhancedStreamableToolCallEndpoint(
+		func(ctx context.Context, arg *schema.ToolArgument, opts ...tool.Option) (*schema.StreamReader[*schema.ToolResult], error) {
+			tr := &schema.ToolResult{Parts: []schema.ToolOutputPart{
+				{Type: schema.ToolPartTypeText, Text: "streamed:" + arg.Text},
+			}}
+			return schema.StreamReaderFromArray([]*schema.ToolResult{tr}), nil
+		})
+
+	tCtx := &adk.ToolContext{Name: "EnhancedStreamTool", CallID: "call_es_1"}
+	wrapped, err := m.WrapEnhancedStreamableToolCall(context.Background(), originalEndpoint, tCtx)
+	require.NoError(t, err)
+
+	sr, err := wrapped(context.Background(), &schema.ToolArgument{Text: `{"k":"v"}`})
+	require.NoError(t, err)
+	require.NotNil(t, sr)
+
+	chunk, err := sr.Recv()
+	require.NoError(t, err)
+	require.Len(t, chunk.Parts, 1)
+	assert.Equal(t, `streamed:{"k":"v"}`, chunk.Parts[0].Text)
+
+	_, err = sr.Recv()
+	assert.Equal(t, io.EOF, err)
+}
+
+func TestWrapEnhancedStreamableToolCall_Deny(t *testing.T) {
+	endpointCalled := false
+	m := New(func(ctx context.Context, tCtx *adk.ToolContext, args *schema.ToolArgument) (*ToolCallDecision, error) {
+		return &ToolCallDecision{Decision: Deny, Message: "stream enhanced blocked"}, nil
+	})
+
+	originalEndpoint := adk.EnhancedStreamableToolCallEndpoint(
+		func(ctx context.Context, arg *schema.ToolArgument, opts ...tool.Option) (*schema.StreamReader[*schema.ToolResult], error) {
+			endpointCalled = true
+			return nil, nil
+		})
+
+	tCtx := &adk.ToolContext{Name: "EnhancedStreamTool", CallID: "call_es_2"}
+	wrapped, err := m.WrapEnhancedStreamableToolCall(context.Background(), originalEndpoint, tCtx)
+	require.NoError(t, err)
+
+	sr, err := wrapped(context.Background(), &schema.ToolArgument{Text: `{}`})
+	require.NoError(t, err)
+	assert.False(t, endpointCalled)
+	require.NotNil(t, sr)
+
+	chunk, err := sr.Recv()
+	require.NoError(t, err)
+	require.Len(t, chunk.Parts, 1)
+	assert.Equal(t, schema.ToolPartTypeText, chunk.Parts[0].Type)
+	assert.Equal(t, "Permission denied for tool EnhancedStreamTool: stream enhanced blocked", chunk.Parts[0].Text)
+
+	_, err = sr.Recv()
+	assert.Equal(t, io.EOF, err)
+}
+
+func TestWrapEnhancedStreamableToolCall_Ask(t *testing.T) {
+	m := New(func(ctx context.Context, tCtx *adk.ToolContext, args *schema.ToolArgument) (*ToolCallDecision, error) {
+		return &ToolCallDecision{Decision: Ask, Message: "enhanced stream needs approval"}, nil
+	})
+
+	originalEndpoint := adk.EnhancedStreamableToolCallEndpoint(
+		func(ctx context.Context, arg *schema.ToolArgument, opts ...tool.Option) (*schema.StreamReader[*schema.ToolResult], error) {
+			return nil, nil
+		})
+
+	tCtx := &adk.ToolContext{Name: "EnhancedStreamTool", CallID: "call_es_3"}
+	wrapped, err := m.WrapEnhancedStreamableToolCall(context.Background(), originalEndpoint, tCtx)
+	require.NoError(t, err)
+
+	ctx := makeCtxWithAddr()
+	sr, err := wrapped(ctx, &schema.ToolArgument{Text: `{}`})
+	assert.Nil(t, sr)
+	require.Error(t, err)
+
+	var is *core.InterruptSignal
+	assert.True(t, errors.As(err, &is))
+}
+
+func TestWrapEnhancedStreamableToolCall_AllowWithUpdatedInput(t *testing.T) {
+	m := New(func(ctx context.Context, tCtx *adk.ToolContext, args *schema.ToolArgument) (*ToolCallDecision, error) {
+		return &ToolCallDecision{Decision: Allow, UpdatedInput: `{"safe":true}`}, nil
+	})
+
+	var receivedText string
+	originalEndpoint := adk.EnhancedStreamableToolCallEndpoint(
+		func(ctx context.Context, arg *schema.ToolArgument, opts ...tool.Option) (*schema.StreamReader[*schema.ToolResult], error) {
+			receivedText = arg.Text
+			tr := &schema.ToolResult{Parts: []schema.ToolOutputPart{
+				{Type: schema.ToolPartTypeText, Text: "ok"},
+			}}
+			return schema.StreamReaderFromArray([]*schema.ToolResult{tr}), nil
+		})
+
+	tCtx := &adk.ToolContext{Name: "EnhancedStreamTool", CallID: "call_es_4"}
+	wrapped, err := m.WrapEnhancedStreamableToolCall(context.Background(), originalEndpoint, tCtx)
+	require.NoError(t, err)
+
+	sr, err := wrapped(context.Background(), &schema.ToolArgument{Text: `{"dangerous":true}`})
+	require.NoError(t, err)
+	require.NotNil(t, sr)
+	assert.Equal(t, `{"safe":true}`, receivedText)
+}

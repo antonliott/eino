@@ -25,6 +25,7 @@ import (
 	"fmt"
 
 	"github.com/cloudwego/eino/adk"
+	"github.com/cloudwego/eino/adk/internal"
 	"github.com/cloudwego/eino/components/tool"
 	"github.com/cloudwego/eino/schema"
 )
@@ -199,6 +200,58 @@ func (m *Middleware) WrapStreamableToolCall(
 	}, nil
 }
 
+func (m *Middleware) WrapEnhancedInvokableToolCall(
+	ctx context.Context,
+	endpoint adk.EnhancedInvokableToolCallEndpoint,
+	tCtx *adk.ToolContext,
+) (adk.EnhancedInvokableToolCallEndpoint, error) {
+	return func(ctx context.Context, toolArgument *schema.ToolArgument, opts ...tool.Option) (*schema.ToolResult, error) {
+		result, err := m.permissionGate(ctx, tCtx, toolArgument.Text)
+		if err != nil {
+			return nil, err
+		}
+		if !result.allowed {
+			return denyToolResult(result.denyResult), nil
+		}
+		if result.updatedInput != toolArgument.Text {
+			toolArgument = &schema.ToolArgument{Text: result.updatedInput}
+		}
+		return endpoint(ctx, toolArgument, opts...)
+	}, nil
+}
+
+func (m *Middleware) WrapEnhancedStreamableToolCall(
+	ctx context.Context,
+	endpoint adk.EnhancedStreamableToolCallEndpoint,
+	tCtx *adk.ToolContext,
+) (adk.EnhancedStreamableToolCallEndpoint, error) {
+	return func(ctx context.Context, toolArgument *schema.ToolArgument, opts ...tool.Option) (*schema.StreamReader[*schema.ToolResult], error) {
+		result, err := m.permissionGate(ctx, tCtx, toolArgument.Text)
+		if err != nil {
+			return nil, err
+		}
+		if !result.allowed {
+			return schema.StreamReaderFromArray([]*schema.ToolResult{denyToolResult(result.denyResult)}), nil
+		}
+		if result.updatedInput != toolArgument.Text {
+			toolArgument = &schema.ToolArgument{Text: result.updatedInput}
+		}
+		return endpoint(ctx, toolArgument, opts...)
+	}, nil
+}
+
+func denyToolResult(denyMsg string) *schema.ToolResult {
+	return &schema.ToolResult{
+		Parts: []schema.ToolOutputPart{
+			{Type: schema.ToolPartTypeText, Text: denyMsg},
+		},
+	}
+}
+
 func formatDenyResult(toolName, message string) string {
-	return fmt.Sprintf("Permission denied for tool %s: %s", toolName, message)
+	tpl := internal.SelectPrompt(internal.I18nPrompts{
+		English: "Permission denied for tool %s: %s",
+		Chinese: "工具 %s 权限被拒绝: %s",
+	})
+	return fmt.Sprintf(tpl, toolName, message)
 }
