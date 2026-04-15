@@ -83,58 +83,248 @@ func TestAgenticMessageToToolCallMessage(t *testing.T) {
 }
 
 func TestToolMessageToAgenticMessage(t *testing.T) {
-	input := []*schema.Message{
-		{
-			Role:       schema.Tool,
-			Content:    "content1",
-			ToolCallID: "1",
-			ToolName:   "name1",
-		},
-		{
-			Role:       schema.Tool,
-			Content:    "content2",
-			ToolCallID: "2",
-			ToolName:   "name2",
-		},
-		{
-			Role:       schema.Tool,
-			Content:    "content3",
-			ToolCallID: "3",
-			ToolName:   "name3",
-		},
-	}
-	ret := toolMessageToAgenticMessage(input)
-	assert.Equal(t, 1, len(ret))
-	assert.Equal(t, schema.AgenticRoleTypeUser, ret[0].Role)
-	assert.Equal(t, []*schema.ContentBlock{
-		{
-			Type: schema.ContentBlockTypeFunctionToolResult,
-			FunctionToolResult: &schema.FunctionToolResult{
-				CallID: "1",
-				Name:   "name1",
-				Result: "content1",
+	t.Run("text only", func(t *testing.T) {
+		input := []*schema.Message{
+			{
+				Role:       schema.Tool,
+				Content:    "content1",
+				ToolCallID: "1",
+				ToolName:   "name1",
 			},
-		},
-		{
-			Type: schema.ContentBlockTypeFunctionToolResult,
-			FunctionToolResult: &schema.FunctionToolResult{
-				CallID: "2",
-				Name:   "name2",
-				Result: "content2",
+			{
+				Role:       schema.Tool,
+				Content:    "content2",
+				ToolCallID: "2",
+				ToolName:   "name2",
 			},
-		},
-		{
-			Type: schema.ContentBlockTypeFunctionToolResult,
-			FunctionToolResult: &schema.FunctionToolResult{
-				CallID: "3",
-				Name:   "name3",
-				Result: "content3",
+			{
+				Role:       schema.Tool,
+				Content:    "content3",
+				ToolCallID: "3",
+				ToolName:   "name3",
 			},
-		},
-	}, ret[0].ContentBlocks)
+		}
+		ret := toolMessageToAgenticMessage(input)
+		assert.Equal(t, 1, len(ret))
+		assert.Equal(t, schema.AgenticRoleTypeUser, ret[0].Role)
+		assert.Equal(t, []*schema.ContentBlock{
+			{
+				Type: schema.ContentBlockTypeFunctionToolResult,
+				FunctionToolResult: &schema.FunctionToolResult{
+					CallID: "1",
+					Name:   "name1",
+					Result: "content1",
+				},
+			},
+			{
+				Type: schema.ContentBlockTypeFunctionToolResult,
+				FunctionToolResult: &schema.FunctionToolResult{
+					CallID: "2",
+					Name:   "name2",
+					Result: "content2",
+				},
+			},
+			{
+				Type: schema.ContentBlockTypeFunctionToolResult,
+				FunctionToolResult: &schema.FunctionToolResult{
+					CallID: "3",
+					Name:   "name3",
+					Result: "content3",
+				},
+			},
+		}, ret[0].ContentBlocks)
+	})
+
+	t.Run("with multimodal content", func(t *testing.T) {
+		imageURL := "https://example.com/image.png"
+		audioBase64 := "YXVkaW9kYXRh"
+		videoURL := "https://example.com/video.mp4"
+		fileURL := "https://example.com/file.pdf"
+
+		input := []*schema.Message{
+			{
+				Role:       schema.Tool,
+				Content:    "text result",
+				ToolCallID: "1",
+				ToolName:   "tool1",
+				UserInputMultiContent: []schema.MessageInputPart{
+					{Type: schema.ChatMessagePartTypeText, Text: "hello"},
+					{Type: schema.ChatMessagePartTypeImageURL, Image: &schema.MessageInputImage{
+						MessagePartCommon: schema.MessagePartCommon{URL: &imageURL, MIMEType: "image/png"},
+						Detail:            schema.ImageURLDetailHigh,
+					}},
+					{Type: schema.ChatMessagePartTypeAudioURL, Audio: &schema.MessageInputAudio{
+						MessagePartCommon: schema.MessagePartCommon{Base64Data: &audioBase64, MIMEType: "audio/wav"},
+					}},
+					{Type: schema.ChatMessagePartTypeVideoURL, Video: &schema.MessageInputVideo{
+						MessagePartCommon: schema.MessagePartCommon{URL: &videoURL, MIMEType: "video/mp4"},
+					}},
+					{Type: schema.ChatMessagePartTypeFileURL, File: &schema.MessageInputFile{
+						MessagePartCommon: schema.MessagePartCommon{URL: &fileURL, MIMEType: "application/pdf"},
+					}},
+				},
+			},
+			{
+				Role:       schema.Tool,
+				Content:    "plain result",
+				ToolCallID: "2",
+				ToolName:   "tool2",
+			},
+		}
+
+		ret := toolMessageToAgenticMessage(input)
+		assert.Equal(t, 1, len(ret))
+		assert.Equal(t, schema.AgenticRoleTypeUser, ret[0].Role)
+
+		// first tool result has ContentBlocks
+		ftr1 := ret[0].ContentBlocks[0].FunctionToolResult
+		assert.Equal(t, "1", ftr1.CallID)
+		assert.Equal(t, "text result", ftr1.Result)
+		assert.Equal(t, 5, len(ftr1.ContentBlocks))
+
+		assert.Equal(t, schema.ContentBlockTypeUserInputText, ftr1.ContentBlocks[0].Type)
+		assert.Equal(t, "hello", ftr1.ContentBlocks[0].UserInputText.Text)
+
+		assert.Equal(t, schema.ContentBlockTypeUserInputImage, ftr1.ContentBlocks[1].Type)
+		assert.Equal(t, imageURL, ftr1.ContentBlocks[1].UserInputImage.URL)
+		assert.Equal(t, schema.ImageURLDetailHigh, ftr1.ContentBlocks[1].UserInputImage.Detail)
+
+		assert.Equal(t, schema.ContentBlockTypeUserInputAudio, ftr1.ContentBlocks[2].Type)
+		assert.Equal(t, audioBase64, ftr1.ContentBlocks[2].UserInputAudio.Base64Data)
+
+		assert.Equal(t, schema.ContentBlockTypeUserInputVideo, ftr1.ContentBlocks[3].Type)
+		assert.Equal(t, videoURL, ftr1.ContentBlocks[3].UserInputVideo.URL)
+
+		assert.Equal(t, schema.ContentBlockTypeUserInputFile, ftr1.ContentBlocks[4].Type)
+		assert.Equal(t, fileURL, ftr1.ContentBlocks[4].UserInputFile.URL)
+
+		// second tool result has no ContentBlocks
+		ftr2 := ret[0].ContentBlocks[1].FunctionToolResult
+		assert.Equal(t, "2", ftr2.CallID)
+		assert.Nil(t, ftr2.ContentBlocks)
+	})
+
+	t.Run("nil media fields are skipped", func(t *testing.T) {
+		input := []*schema.Message{
+			{
+				Role:       schema.Tool,
+				Content:    "result",
+				ToolCallID: "1",
+				ToolName:   "tool1",
+				UserInputMultiContent: []schema.MessageInputPart{
+					{Type: schema.ChatMessagePartTypeImageURL, Image: nil},
+					{Type: schema.ChatMessagePartTypeAudioURL, Audio: nil},
+					{Type: schema.ChatMessagePartTypeVideoURL, Video: nil},
+					{Type: schema.ChatMessagePartTypeFileURL, File: nil},
+					{Type: schema.ChatMessagePartTypeText, Text: "only text"},
+				},
+			},
+		}
+		ret := toolMessageToAgenticMessage(input)
+		ftr := ret[0].ContentBlocks[0].FunctionToolResult
+		assert.Equal(t, 1, len(ftr.ContentBlocks))
+		assert.Equal(t, "only text", ftr.ContentBlocks[0].UserInputText.Text)
+	})
+}
+
+func TestMessageInputPartsToContentBlocks(t *testing.T) {
+	url1 := "https://example.com/img.jpg"
+	base64 := "aW1hZ2VkYXRh"
+
+	t.Run("deref nil pointer returns empty string", func(t *testing.T) {
+		input := []schema.MessageInputPart{
+			{Type: schema.ChatMessagePartTypeImageURL, Image: &schema.MessageInputImage{
+				MessagePartCommon: schema.MessagePartCommon{URL: nil, Base64Data: nil},
+			}},
+		}
+		blocks := messageInputPartsToContentBlocks(input)
+		assert.Equal(t, 1, len(blocks))
+		assert.Equal(t, "", blocks[0].UserInputImage.URL)
+		assert.Equal(t, "", blocks[0].UserInputImage.Base64Data)
+	})
+
+	t.Run("deref non-nil pointer returns value", func(t *testing.T) {
+		input := []schema.MessageInputPart{
+			{Type: schema.ChatMessagePartTypeImageURL, Image: &schema.MessageInputImage{
+				MessagePartCommon: schema.MessagePartCommon{URL: &url1, Base64Data: &base64, MIMEType: "image/jpeg"},
+			}},
+		}
+		blocks := messageInputPartsToContentBlocks(input)
+		assert.Equal(t, 1, len(blocks))
+		assert.Equal(t, url1, blocks[0].UserInputImage.URL)
+		assert.Equal(t, base64, blocks[0].UserInputImage.Base64Data)
+		assert.Equal(t, "image/jpeg", blocks[0].UserInputImage.MIMEType)
+	})
+
+	t.Run("empty parts returns empty blocks", func(t *testing.T) {
+		blocks := messageInputPartsToContentBlocks(nil)
+		assert.Equal(t, 0, len(blocks))
+	})
 }
 
 func TestStreamToolMessageToAgenticMessage(t *testing.T) {
+	t.Run("text only", func(t *testing.T) {
+		testStreamToolMessageTextOnly(t)
+	})
+
+	t.Run("with multimodal content", func(t *testing.T) {
+		imageURL := "https://example.com/image.png"
+		input := schema.StreamReaderFromArray([][]*schema.Message{
+			{
+				{
+					Role:       schema.Tool,
+					Content:    "result1",
+					ToolName:   "tool1",
+					ToolCallID: "1",
+					UserInputMultiContent: []schema.MessageInputPart{
+						{Type: schema.ChatMessagePartTypeText, Text: "text part"},
+						{Type: schema.ChatMessagePartTypeImageURL, Image: &schema.MessageInputImage{
+							MessagePartCommon: schema.MessagePartCommon{URL: &imageURL},
+						}},
+					},
+				},
+				nil,
+			},
+			{
+				nil,
+				{
+					Role:       schema.Tool,
+					Content:    "result2",
+					ToolName:   "tool2",
+					ToolCallID: "2",
+				},
+			},
+		})
+		ret := streamToolMessageToAgenticMessage(input)
+		var chunks [][]*schema.AgenticMessage
+		for {
+			chunk, err := ret.Recv()
+			if err == io.EOF {
+				break
+			}
+			assert.NoError(t, err)
+			chunks = append(chunks, chunk)
+		}
+		result, err := schema.ConcatAgenticMessagesArray(chunks)
+		assert.NoError(t, err)
+
+		assert.Equal(t, 1, len(result))
+		assert.Equal(t, 2, len(result[0].ContentBlocks))
+
+		ftr1 := result[0].ContentBlocks[0].FunctionToolResult
+		assert.Equal(t, "1", ftr1.CallID)
+		assert.Equal(t, 2, len(ftr1.ContentBlocks))
+		assert.Equal(t, schema.ContentBlockTypeUserInputText, ftr1.ContentBlocks[0].Type)
+		assert.Equal(t, schema.ContentBlockTypeUserInputImage, ftr1.ContentBlocks[1].Type)
+		assert.Equal(t, imageURL, ftr1.ContentBlocks[1].UserInputImage.URL)
+
+		ftr2 := result[0].ContentBlocks[1].FunctionToolResult
+		assert.Equal(t, "2", ftr2.CallID)
+		assert.Nil(t, ftr2.ContentBlocks)
+	})
+}
+
+func testStreamToolMessageTextOnly(t *testing.T) {
 	input := schema.StreamReaderFromArray([][]*schema.Message{
 		{
 			{

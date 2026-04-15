@@ -307,6 +307,9 @@ type FunctionToolResult struct {
 
 	// Result is the function tool result returned by the user
 	Result string `json:"result,omitempty"`
+
+	// ContentBlocks is the list of content blocks.
+	ContentBlocks []*ContentBlock `json:"content_blocks,omitempty"`
 }
 
 // ToolSearchFunctionToolResult represents the result of a client-side custom tool search
