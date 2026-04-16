@@ -4815,6 +4815,67 @@ func TestUntilIdleFor_ContextCancelDuringIdleWait(t *testing.T) {
 	assert.ErrorIs(t, exit.ExitReason, context.Canceled)
 }
 
+// TestStopSignalCheck_NilPreservedUnderConcurrentSignals hammers
+// stopSignal.check() and signal() concurrently to verify that the nil guard
+// in check() does not race with signal(). The race detector should catch any
+// unsynchronised access.
+func TestStopSignalCheck_NilPreservedUnderConcurrentSignals(t *testing.T) {
+	sig := newStopSignal()
+
+	const goroutines = 20
+	const iterations = 200
+
+	var wg sync.WaitGroup
+
+	// Half the goroutines call signal() with UntilIdleFor-style config (nil agentCancelOpts).
+	for i := 0; i < goroutines/2; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := 0; j < iterations; j++ {
+				// UntilIdleFor produces nil agentCancelOpts after Stop() forces it.
+				sig.signal(&stopConfig{idleFor: 100 * time.Millisecond})
+			}
+		}()
+	}
+
+	// The other half call signal() with WithImmediate-style config (non-nil empty opts).
+	for i := 0; i < goroutines/2; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := 0; j < iterations; j++ {
+				sig.signal(&stopConfig{agentCancelOpts: []AgentCancelOption{}})
+			}
+		}()
+	}
+
+	// Concurrently read check() — the nil guard must be race-free.
+	sawNil := int32(0)
+	sawNonNil := int32(0)
+	for i := 0; i < goroutines; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := 0; j < iterations; j++ {
+				_, opts := sig.check()
+				if opts == nil {
+					atomic.AddInt32(&sawNil, 1)
+				} else {
+					atomic.AddInt32(&sawNonNil, 1)
+				}
+			}
+		}()
+	}
+
+	wg.Wait()
+
+	// We expect both nil and non-nil snapshots to have been observed, since
+	// signal() alternates between the two modes concurrently.
+	t.Logf("sawNil=%d sawNonNil=%d", atomic.LoadInt32(&sawNil), atomic.LoadInt32(&sawNonNil))
+	// Main point: no race detector failure. The counts are non-deterministic.
+}
+
 func TestUntilIdleFor_NonPositive_Panics(t *testing.T) {
 	assert.PanicsWithValue(t, "adk: UntilIdleFor: duration must be positive",
 		func() { UntilIdleFor(0) })

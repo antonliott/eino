@@ -1567,7 +1567,7 @@ func (l *TurnLoop[T]) watchStopSignal(done <-chan struct{}, agentCancelFunc Agen
 			return
 		}
 		lastGen = gen
-		if opts == nil {
+		if opts == nil { // no cancel intent; see stopSignal.agentCancelOpts
 			return
 		}
 		_, contributed := agentCancelFunc(opts...)
