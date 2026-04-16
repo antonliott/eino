@@ -123,6 +123,8 @@ type ChatModelAgentContext struct {
 //   - AgentMiddleware is kept for backward compatibility with existing users
 //   - Both can be used together; see AgentMiddleware documentation for execution order
 //
+// ChatModelAgentMiddleware defines the interface for customizing ChatModelAgent behavior.
+//
 // Use *TypedBaseChatModelAgentMiddleware as an embedded struct to provide default no-op
 // implementations for all methods.
 type TypedChatModelAgentMiddleware[M messageType] interface {
@@ -221,24 +223,44 @@ type TypedChatModelAgentMiddleware[M messageType] interface {
 	WrapModel(ctx context.Context, m model.BaseModel[M], mc *ModelContext) (model.BaseModel[M], error)
 
 	// BeforeFinalAnswer is called when the model produces a response with no tool calls
-	// (a "final answer") before it is accepted and the agent exits.
+	// (a "final answer"). It acts as a quality gate: inspect the response and decide
+	// whether to accept or reject it.
 	//
 	// The state contains all messages including the model's final answer as the last message.
 	// The hook can inspect the response (e.g., FinishReason, content) and decide whether
 	// to accept or reject it.
 	//
 	// Returns:
-	//   - ctx: the (possibly modified) context
-	//   - accept: if true, the final answer is accepted and the agent exits normally.
-	//     If false, the agent loops back to the ChatModel for another iteration.
-	//     The handler may modify state.Messages before returning false (e.g., append a
-	//     "please continue" user message after a truncated response).
-	//   - state: the (possibly modified) agent state
+	//   - ctx: the (possibly modified) context. Note: context modifications are propagated
+	//     to subsequent handlers in the chain and used for state write-back, but are NOT
+	//     propagated to downstream graph nodes due to a compose framework constraint.
+	//     To pass data across iterations, use SetRunLocalValue/GetRunLocalValue instead.
+	//   - decision: AcceptFinalAnswer to exit the agent normally, or RejectFinalAnswer to
+	//     loop back to the ChatModel for another iteration. The handler may modify
+	//     state.Messages before rejecting (e.g., append a "please continue" user message
+	//     after a truncated response).
+	//   - state: the (possibly modified) agent state. If nil, the previous state is preserved.
 	//   - error: if non-nil, the agent exits with this error
 	//
 	// Rejected answers count toward MaxIterations, providing a natural cap on runaway loops.
-	BeforeFinalAnswer(ctx context.Context, state *ChatModelAgentState) (context.Context, bool, *ChatModelAgentState, error)
+	//
+	// When multiple handlers are registered, all handlers execute in order even if an earlier
+	// handler rejects. A single RejectFinalAnswer from any handler vetoes the final answer.
+	// Handlers see state modifications from prior handlers in the chain.
+	BeforeFinalAnswer(ctx context.Context, state *ChatModelAgentState) (context.Context, FinalAnswerDecision, *ChatModelAgentState, error)
 }
+
+// FinalAnswerDecision represents the decision made by a BeforeFinalAnswer hook.
+type FinalAnswerDecision int
+
+const (
+	// AcceptFinalAnswer indicates the final answer should be accepted and the agent exits normally.
+	AcceptFinalAnswer FinalAnswerDecision = iota
+
+	// RejectFinalAnswer indicates the final answer should be rejected and the agent loops
+	// back to the ChatModel for another iteration.
+	RejectFinalAnswer
+)
 
 // ChatModelAgentMiddleware is the default middleware type using *schema.Message.
 // See TypedChatModelAgentMiddleware for full documentation.
@@ -298,8 +320,8 @@ func (b *TypedBaseChatModelAgentMiddleware[M]) AfterToolCallsRewriteState(ctx co
 	return ctx, state, nil
 }
 
-func (b *BaseChatModelAgentMiddleware) BeforeFinalAnswer(ctx context.Context, state *ChatModelAgentState) (context.Context, bool, *ChatModelAgentState, error) {
-	return ctx, true, state, nil
+func (b *BaseChatModelAgentMiddleware) BeforeFinalAnswer(ctx context.Context, state *ChatModelAgentState) (context.Context, FinalAnswerDecision, *ChatModelAgentState, error) {
+	return ctx, AcceptFinalAnswer, state, nil
 }
 
 func processTypedState(ctx context.Context, fn func(extra map[string]any) map[string]any) error {

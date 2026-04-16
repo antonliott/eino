@@ -23,6 +23,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/components/tool"
@@ -53,10 +54,10 @@ func (m *bfaDelegateModel) Stream(_ context.Context, input []*schema.Message, _ 
 
 type beforeFinalAnswerHandler struct {
 	BaseChatModelAgentMiddleware
-	fn func(ctx context.Context, state *ChatModelAgentState) (context.Context, bool, *ChatModelAgentState, error)
+	fn func(ctx context.Context, state *ChatModelAgentState) (context.Context, FinalAnswerDecision, *ChatModelAgentState, error)
 }
 
-func (h *beforeFinalAnswerHandler) BeforeFinalAnswer(ctx context.Context, state *ChatModelAgentState) (context.Context, bool, *ChatModelAgentState, error) {
+func (h *beforeFinalAnswerHandler) BeforeFinalAnswer(ctx context.Context, state *ChatModelAgentState) (context.Context, FinalAnswerDecision, *ChatModelAgentState, error) {
 	return h.fn(ctx, state)
 }
 
@@ -101,9 +102,9 @@ func TestBeforeFinalAnswer(t *testing.T) {
 			Name: "test", Description: "d", Instruction: "i", Model: m,
 			MaxIterations: 5,
 			Handlers: []ChatModelAgentMiddleware{
-				&beforeFinalAnswerHandler{fn: func(ctx context.Context, state *ChatModelAgentState) (context.Context, bool, *ChatModelAgentState, error) {
+				&beforeFinalAnswerHandler{fn: func(ctx context.Context, state *ChatModelAgentState) (context.Context, FinalAnswerDecision, *ChatModelAgentState, error) {
 					atomic.AddInt32(&hookCalls, 1)
-					return ctx, true, state, nil
+					return ctx, AcceptFinalAnswer, state, nil
 				}},
 			},
 		})
@@ -135,13 +136,13 @@ func TestBeforeFinalAnswer(t *testing.T) {
 			Name: "test", Description: "d", Instruction: "i", Model: m,
 			MaxIterations: 5,
 			Handlers: []ChatModelAgentMiddleware{
-				&beforeFinalAnswerHandler{fn: func(ctx context.Context, state *ChatModelAgentState) (context.Context, bool, *ChatModelAgentState, error) {
+				&beforeFinalAnswerHandler{fn: func(ctx context.Context, state *ChatModelAgentState) (context.Context, FinalAnswerDecision, *ChatModelAgentState, error) {
 					lastMsg := state.Messages[len(state.Messages)-1]
 					if lastMsg.ResponseMeta != nil && lastMsg.ResponseMeta.FinishReason == "length" {
 						state.Messages = append(state.Messages, schema.UserMessage("Please continue."))
-						return ctx, false, state, nil
+						return ctx, RejectFinalAnswer, state, nil
 					}
-					return ctx, true, state, nil
+					return ctx, AcceptFinalAnswer, state, nil
 				}},
 			},
 		})
@@ -174,12 +175,12 @@ func TestBeforeFinalAnswer(t *testing.T) {
 			Name: "test", Description: "d", Instruction: "i", Model: m,
 			MaxIterations: 5,
 			Handlers: []ChatModelAgentMiddleware{
-				&beforeFinalAnswerHandler{fn: func(ctx context.Context, state *ChatModelAgentState) (context.Context, bool, *ChatModelAgentState, error) {
+				&beforeFinalAnswerHandler{fn: func(ctx context.Context, state *ChatModelAgentState) (context.Context, FinalAnswerDecision, *ChatModelAgentState, error) {
 					lastMsg := state.Messages[len(state.Messages)-1]
 					if lastMsg.ResponseMeta != nil && lastMsg.ResponseMeta.FinishReason == "length" {
-						return ctx, false, state, nil
+						return ctx, RejectFinalAnswer, state, nil
 					}
-					return ctx, true, state, nil
+					return ctx, AcceptFinalAnswer, state, nil
 				}},
 			},
 		})
@@ -205,8 +206,8 @@ func TestBeforeFinalAnswer(t *testing.T) {
 			Name: "test", Description: "d", Instruction: "i", Model: m,
 			MaxIterations: 3,
 			Handlers: []ChatModelAgentMiddleware{
-				&beforeFinalAnswerHandler{fn: func(ctx context.Context, state *ChatModelAgentState) (context.Context, bool, *ChatModelAgentState, error) {
-					return ctx, false, state, nil
+				&beforeFinalAnswerHandler{fn: func(ctx context.Context, state *ChatModelAgentState) (context.Context, FinalAnswerDecision, *ChatModelAgentState, error) {
+					return ctx, RejectFinalAnswer, state, nil
 				}},
 			},
 		})
@@ -230,8 +231,8 @@ func TestBeforeFinalAnswer(t *testing.T) {
 			Name: "test", Description: "d", Instruction: "i", Model: m,
 			MaxIterations: 5,
 			Handlers: []ChatModelAgentMiddleware{
-				&beforeFinalAnswerHandler{fn: func(ctx context.Context, state *ChatModelAgentState) (context.Context, bool, *ChatModelAgentState, error) {
-					return ctx, false, state, hookErr
+				&beforeFinalAnswerHandler{fn: func(ctx context.Context, state *ChatModelAgentState) (context.Context, FinalAnswerDecision, *ChatModelAgentState, error) {
+					return ctx, RejectFinalAnswer, state, hookErr
 				}},
 			},
 		})
@@ -266,9 +267,9 @@ func TestBeforeFinalAnswer(t *testing.T) {
 				ToolsNodeConfig: compose.ToolsNodeConfig{Tools: []tool.BaseTool{&fakeToolForTest{tarCount: 0}}},
 			},
 			Handlers: []ChatModelAgentMiddleware{
-				&beforeFinalAnswerHandler{fn: func(ctx context.Context, state *ChatModelAgentState) (context.Context, bool, *ChatModelAgentState, error) {
+				&beforeFinalAnswerHandler{fn: func(ctx context.Context, state *ChatModelAgentState) (context.Context, FinalAnswerDecision, *ChatModelAgentState, error) {
 					atomic.AddInt32(&hookCalls, 1)
-					return ctx, true, state, nil
+					return ctx, AcceptFinalAnswer, state, nil
 				}},
 			},
 		})
@@ -313,13 +314,13 @@ func TestBeforeFinalAnswer(t *testing.T) {
 				ToolsNodeConfig: compose.ToolsNodeConfig{Tools: []tool.BaseTool{&fakeToolForTest{tarCount: 0}}},
 			},
 			Handlers: []ChatModelAgentMiddleware{
-				&beforeFinalAnswerHandler{fn: func(ctx context.Context, state *ChatModelAgentState) (context.Context, bool, *ChatModelAgentState, error) {
+				&beforeFinalAnswerHandler{fn: func(ctx context.Context, state *ChatModelAgentState) (context.Context, FinalAnswerDecision, *ChatModelAgentState, error) {
 					lastMsg := state.Messages[len(state.Messages)-1]
 					if lastMsg.ResponseMeta != nil && lastMsg.ResponseMeta.FinishReason == "length" {
 						state.Messages = append(state.Messages, schema.UserMessage("Continue please."))
-						return ctx, false, state, nil
+						return ctx, RejectFinalAnswer, state, nil
 					}
-					return ctx, true, state, nil
+					return ctx, AcceptFinalAnswer, state, nil
 				}},
 			},
 		})
@@ -369,12 +370,12 @@ func TestBeforeFinalAnswer(t *testing.T) {
 			Name: "test", Description: "d", Instruction: "i", Model: m,
 			MaxIterations: 5,
 			Handlers: []ChatModelAgentMiddleware{
-				&beforeFinalAnswerHandler{fn: func(ctx context.Context, state *ChatModelAgentState) (context.Context, bool, *ChatModelAgentState, error) {
+				&beforeFinalAnswerHandler{fn: func(ctx context.Context, state *ChatModelAgentState) (context.Context, FinalAnswerDecision, *ChatModelAgentState, error) {
 					lastMsg := state.Messages[len(state.Messages)-1]
 					if lastMsg.Content == "" && len(lastMsg.ToolCalls) == 0 {
-						return ctx, false, state, nil
+						return ctx, RejectFinalAnswer, state, nil
 					}
-					return ctx, true, state, nil
+					return ctx, AcceptFinalAnswer, state, nil
 				}},
 			},
 		})
@@ -384,6 +385,99 @@ func TestBeforeFinalAnswer(t *testing.T) {
 		lastEvent := events[len(events)-1]
 		assert.Nil(t, lastEvent.Err)
 		assert.Equal(t, "real content", lastEvent.Output.MessageOutput.Message.Content)
+		assert.Equal(t, int32(2), atomic.LoadInt32(&callCount))
+	})
+
+	t.Run("nil state return with accept preserves previous state", func(t *testing.T) {
+		m := &bfaDelegateModel{
+			generateFn: func(_ []*schema.Message) (*schema.Message, error) {
+				return schema.AssistantMessage("answer", nil), nil
+			},
+		}
+
+		agent, err := NewChatModelAgent(context.Background(), &ChatModelAgentConfig{
+			Name: "test", Description: "d", Instruction: "i", Model: m,
+			MaxIterations: 5,
+			Handlers: []ChatModelAgentMiddleware{
+				&beforeFinalAnswerHandler{fn: func(ctx context.Context, state *ChatModelAgentState) (context.Context, FinalAnswerDecision, *ChatModelAgentState, error) {
+					return ctx, AcceptFinalAnswer, nil, nil
+				}},
+			},
+		})
+		require.NoError(t, err)
+
+		events := drainBFAIterator(agent.Run(context.Background(), &AgentInput{Messages: []Message{schema.UserMessage("hi")}}))
+		require.NotEmpty(t, events)
+		lastEvent := events[len(events)-1]
+		assert.Nil(t, lastEvent.Err)
+		assert.Equal(t, "answer", lastEvent.Output.MessageOutput.Message.Content)
+	})
+
+	t.Run("nil state return with reject loops without panic", func(t *testing.T) {
+		m := &bfaDelegateModel{
+			generateFn: func(_ []*schema.Message) (*schema.Message, error) {
+				return schema.AssistantMessage("answer", nil), nil
+			},
+		}
+
+		agent, err := NewChatModelAgent(context.Background(), &ChatModelAgentConfig{
+			Name: "test", Description: "d", Instruction: "i", Model: m,
+			MaxIterations: 3,
+			Handlers: []ChatModelAgentMiddleware{
+				&beforeFinalAnswerHandler{fn: func(ctx context.Context, state *ChatModelAgentState) (context.Context, FinalAnswerDecision, *ChatModelAgentState, error) {
+					return ctx, RejectFinalAnswer, nil, nil
+				}},
+			},
+		})
+		require.NoError(t, err)
+
+		events := drainBFAIterator(agent.Run(context.Background(), &AgentInput{Messages: []Message{schema.UserMessage("hi")}}))
+		drainBFAStreamEvents(events)
+		require.NotEmpty(t, events)
+		lastEvent := events[len(events)-1]
+		assert.ErrorIs(t, lastEvent.Err, ErrExceedMaxIterations)
+	})
+
+	t.Run("multiple handlers: single reject vetoes, all handlers execute", func(t *testing.T) {
+		var callCount int32
+		m := &bfaDelegateModel{
+			generateFn: func(_ []*schema.Message) (*schema.Message, error) {
+				count := atomic.AddInt32(&callCount, 1)
+				if count == 1 {
+					return schema.AssistantMessage("bad", nil), nil
+				}
+				return schema.AssistantMessage("good", nil), nil
+			},
+		}
+
+		var h1Calls, h2Calls int32
+		agent, err := NewChatModelAgent(context.Background(), &ChatModelAgentConfig{
+			Name: "test", Description: "d", Instruction: "i", Model: m,
+			MaxIterations: 5,
+			Handlers: []ChatModelAgentMiddleware{
+				&beforeFinalAnswerHandler{fn: func(ctx context.Context, state *ChatModelAgentState) (context.Context, FinalAnswerDecision, *ChatModelAgentState, error) {
+					atomic.AddInt32(&h1Calls, 1)
+					if state.Messages[len(state.Messages)-1].Content == "bad" {
+						return ctx, RejectFinalAnswer, state, nil
+					}
+					return ctx, AcceptFinalAnswer, state, nil
+				}},
+				&beforeFinalAnswerHandler{fn: func(ctx context.Context, state *ChatModelAgentState) (context.Context, FinalAnswerDecision, *ChatModelAgentState, error) {
+					atomic.AddInt32(&h2Calls, 1)
+					return ctx, AcceptFinalAnswer, state, nil
+				}},
+			},
+		})
+		require.NoError(t, err)
+
+		events := drainBFAIterator(agent.Run(context.Background(), &AgentInput{Messages: []Message{schema.UserMessage("hi")}}))
+		require.NotEmpty(t, events)
+		lastEvent := events[len(events)-1]
+		assert.Nil(t, lastEvent.Err)
+		assert.Equal(t, "good", lastEvent.Output.MessageOutput.Message.Content)
+
+		assert.Equal(t, int32(2), atomic.LoadInt32(&h1Calls))
+		assert.Equal(t, int32(2), atomic.LoadInt32(&h2Calls))
 		assert.Equal(t, int32(2), atomic.LoadInt32(&callCount))
 	})
 }

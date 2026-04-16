@@ -496,15 +496,17 @@ func runBeforeFinalAnswer(ctx context.Context, mwConf *modelWrapperConfig) (bool
 	accepted := true
 
 	for _, handler := range mwConf.handlers {
-		var accept bool
+		var decision FinalAnswerDecision
 		var newState *ChatModelAgentState
 		var err error
-		ctx, accept, newState, err = handler.BeforeFinalAnswer(ctx, state)
+		ctx, decision, newState, err = handler.BeforeFinalAnswer(ctx, state)
 		if err != nil {
 			return false, err
 		}
-		state = newState
-		if !accept {
+		if newState != nil {
+			state = newState
+		}
+		if decision == RejectFinalAnswer {
 			accepted = false
 		}
 	}
@@ -531,6 +533,13 @@ func addFinalAnswerBranch(g *compose.Graph[*reactInput, Message], chatModelNode,
 	}), compose.WithNodeName(finalAnswerRejectionNode_))
 	_ = g.AddEdge(finalAnswerRejectionNode_, chatModelNode)
 
+	// toolCallCheck drains the model's output stream to determine routing:
+	// - If any chunk contains tool calls → route to tool execution (cancelCheckNode)
+	// - If stream ends with no tool calls → this is a final answer.
+	//   The model wrapper has already written the complete response into
+	//   State.Messages via ProcessState, so BeforeFinalAnswer hooks see
+	//   the full response. If rejected, modified state is written back and
+	//   we route to FinalAnswerRejection to loop back to ChatModel.
 	toolCallCheck := func(ctx context.Context, sMsg MessageStream) (string, error) {
 		defer sMsg.Close()
 		for {
