@@ -58,7 +58,8 @@ type stopSignal struct {
 	mu  sync.Mutex
 	gen uint64
 	// agentCancelOpts controls how the stop interacts with the running agent:
-	//   nil       → no cancel; the turn runs to completion (bare Stop)
+	//   nil       → no cancel intent; the turn runs to completion
+	//             (bare Stop, or UntilIdleFor without cancel opts)
 	//   empty     → CancelImmediate (WithImmediate)
 	//   non-empty → cancel with specific modes (WithGraceful, WithGracefulTimeout)
 	agentCancelOpts []AgentCancelOption
