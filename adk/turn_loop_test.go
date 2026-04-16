@@ -4631,6 +4631,190 @@ func TestUntilIdleFor(t *testing.T) {
 	})
 }
 
+// TestUntilIdleFor_DoesNotCancelRunningAgent verifies that Stop(UntilIdleFor)
+// does NOT cancel a running agent. The notify signal from UntilIdleFor must not
+// be misinterpreted as a cancel request by watchStopSignal. This is a regression
+// test for a bug where stopSignal.check() converted nil agentCancelOpts to a
+// non-nil empty slice, which tryCancel treated as CancelImmediate.
+func TestUntilIdleFor_DoesNotCancelRunningAgent(t *testing.T) {
+	t.Run("BeforeRun", func(t *testing.T) {
+		agentStarted := make(chan struct{})
+		agentCtxCanceled := int32(0)
+		agentDone := make(chan struct{})
+
+		loop := NewTurnLoop(TurnLoopConfig[string]{
+			GenInput: func(ctx context.Context, _ *TurnLoop[string], items []string) (*GenInputResult[string], error) {
+				return &GenInputResult[string]{
+					Input:    &AgentInput{Messages: []Message{schema.UserMessage(items[0])}},
+					Consumed: items,
+				}, nil
+			},
+			PrepareAgent: func(ctx context.Context, _ *TurnLoop[string], consumed []string) (Agent, error) {
+				return &turnLoopCancellableMockAgent{
+					name: "test",
+					runFunc: func(ctx context.Context, input *AgentInput) (*AgentOutput, error) {
+						close(agentStarted)
+						// Block until context is canceled or a short timeout.
+						select {
+						case <-ctx.Done():
+							atomic.StoreInt32(&agentCtxCanceled, 1)
+						case <-time.After(200 * time.Millisecond):
+						}
+						close(agentDone)
+						return &AgentOutput{}, nil
+					},
+				}, nil
+			},
+		})
+
+		loop.Push("msg1")
+		// Call Stop(UntilIdleFor) BEFORE Run.
+		loop.Stop(UntilIdleFor(50 * time.Millisecond))
+		loop.Run(context.Background())
+
+		<-agentStarted
+		<-agentDone
+
+		exit := loop.Wait()
+		assert.Nil(t, exit.ExitReason, "UntilIdleFor should not produce a CancelError")
+		assert.Equal(t, int32(0), atomic.LoadInt32(&agentCtxCanceled),
+			"agent context should not have been canceled by UntilIdleFor")
+	})
+
+	t.Run("DuringRun", func(t *testing.T) {
+		agentStarted := make(chan struct{})
+		agentCtxCanceled := int32(0)
+		agentDone := make(chan struct{})
+
+		loop := newAndRunTurnLoop(context.Background(), TurnLoopConfig[string]{
+			GenInput: func(ctx context.Context, _ *TurnLoop[string], items []string) (*GenInputResult[string], error) {
+				return &GenInputResult[string]{
+					Input:    &AgentInput{Messages: []Message{schema.UserMessage(items[0])}},
+					Consumed: items,
+				}, nil
+			},
+			PrepareAgent: func(ctx context.Context, _ *TurnLoop[string], consumed []string) (Agent, error) {
+				return &turnLoopCancellableMockAgent{
+					name: "test",
+					runFunc: func(ctx context.Context, input *AgentInput) (*AgentOutput, error) {
+						close(agentStarted)
+						select {
+						case <-ctx.Done():
+							atomic.StoreInt32(&agentCtxCanceled, 1)
+						case <-time.After(200 * time.Millisecond):
+						}
+						close(agentDone)
+						return &AgentOutput{}, nil
+					},
+				}, nil
+			},
+		})
+
+		loop.Push("msg1")
+		<-agentStarted
+
+		// Call Stop(UntilIdleFor) while the agent is running.
+		loop.Stop(UntilIdleFor(50 * time.Millisecond))
+		<-agentDone
+
+		exit := loop.Wait()
+		assert.Nil(t, exit.ExitReason, "UntilIdleFor should not produce a CancelError")
+		assert.Equal(t, int32(0), atomic.LoadInt32(&agentCtxCanceled),
+			"agent context should not have been canceled by UntilIdleFor")
+	})
+
+	// Cancel opts paired with UntilIdleFor in the same call are silently
+	// dropped. The agent must run to completion even when WithImmediate is
+	// combined with UntilIdleFor.
+	t.Run("CancelOptsDroppedInSameCall", func(t *testing.T) {
+		agentStarted := make(chan struct{})
+		agentCtxCanceled := int32(0)
+		agentDone := make(chan struct{})
+
+		loop := newAndRunTurnLoop(context.Background(), TurnLoopConfig[string]{
+			GenInput: func(ctx context.Context, _ *TurnLoop[string], items []string) (*GenInputResult[string], error) {
+				return &GenInputResult[string]{
+					Input:    &AgentInput{Messages: []Message{schema.UserMessage(items[0])}},
+					Consumed: items,
+				}, nil
+			},
+			PrepareAgent: func(ctx context.Context, _ *TurnLoop[string], consumed []string) (Agent, error) {
+				return &turnLoopCancellableMockAgent{
+					name: "test",
+					runFunc: func(ctx context.Context, input *AgentInput) (*AgentOutput, error) {
+						close(agentStarted)
+						select {
+						case <-ctx.Done():
+							atomic.StoreInt32(&agentCtxCanceled, 1)
+						case <-time.After(200 * time.Millisecond):
+						}
+						close(agentDone)
+						return &AgentOutput{}, nil
+					},
+				}, nil
+			},
+		})
+
+		loop.Push("msg1")
+		<-agentStarted
+
+		// WithImmediate in the same call as UntilIdleFor must be ignored.
+		loop.Stop(UntilIdleFor(50*time.Millisecond), WithImmediate())
+		<-agentDone
+
+		exit := loop.Wait()
+		assert.Nil(t, exit.ExitReason, "cancel opts should be dropped when combined with UntilIdleFor")
+		assert.Equal(t, int32(0), atomic.LoadInt32(&agentCtxCanceled),
+			"agent context should not have been canceled")
+	})
+}
+
+func TestUntilIdleFor_ContextCancelDuringIdleWait(t *testing.T) {
+	turnDone := make(chan struct{})
+	ctx, cancel := context.WithCancel(context.Background())
+
+	loop := newAndRunTurnLoop(ctx, TurnLoopConfig[string]{
+		GenInput: func(ctx context.Context, _ *TurnLoop[string], items []string) (*GenInputResult[string], error) {
+			return &GenInputResult[string]{
+				Input:    &AgentInput{Messages: []Message{schema.UserMessage(items[0])}},
+				Consumed: items,
+			}, nil
+		},
+		PrepareAgent: func(ctx context.Context, _ *TurnLoop[string], consumed []string) (Agent, error) {
+			return &turnLoopMockAgent{
+				name: "test",
+				runFunc: func(ctx context.Context, input *AgentInput) (*AgentOutput, error) {
+					close(turnDone)
+					return &AgentOutput{}, nil
+				},
+			}, nil
+		},
+	})
+
+	loop.Push("msg1")
+	<-turnDone
+
+	// Start idle timer, then cancel the parent context while idle.
+	loop.Stop(UntilIdleFor(10 * time.Minute))
+	time.Sleep(20 * time.Millisecond)
+	cancel()
+
+	done := make(chan struct{})
+	go func() {
+		loop.Wait()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("loop should exit when context is canceled during idle wait")
+	}
+
+	exit := loop.Wait()
+	assert.ErrorIs(t, exit.ExitReason, context.Canceled)
+}
+
 func TestUntilIdleFor_NonPositive_Panics(t *testing.T) {
 	assert.PanicsWithValue(t, "adk: UntilIdleFor: duration must be positive",
 		func() { UntilIdleFor(0) })
