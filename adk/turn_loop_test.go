@@ -5387,3 +5387,164 @@ func TestUntilIdleFor_NonPositive_Panics(t *testing.T) {
 	assert.PanicsWithValue(t, "adk: UntilIdleFor: duration must be positive",
 		func() { UntilIdleFor(-1 * time.Second) })
 }
+
+func TestAttack_UntilIdleFor_ThenWithImmediate_Escalation(t *testing.T) {
+	agentStarted := make(chan *cancelContext, 1)
+	probe := &turnLoopStopModeProbeAgent{ccCh: agentStarted}
+	loop := newAndRunTurnLoop(context.Background(), TurnLoopConfig[string]{
+		GenInput: func(ctx context.Context, _ *TurnLoop[string], items []string) (*GenInputResult[string], error) {
+			return &GenInputResult[string]{
+				Input:    &AgentInput{Messages: []Message{schema.UserMessage(items[0])}},
+				Consumed: items,
+			}, nil
+		},
+		PrepareAgent: func(ctx context.Context, _ *TurnLoop[string], consumed []string) (Agent, error) {
+			return probe, nil
+		},
+	})
+
+	loop.Push("msg1")
+	cc := <-agentStarted
+
+	loop.Stop(UntilIdleFor(10 * time.Minute))
+	time.Sleep(20 * time.Millisecond)
+	mode := cc.getMode()
+	assert.Equal(t, CancelMode(0), mode, "UntilIdleFor must not set any cancel mode on the agent")
+
+	loop.Stop(WithImmediate())
+	time.Sleep(20 * time.Millisecond)
+	mode = cc.getMode()
+	assert.Equal(t, CancelImmediate, mode, "WithImmediate after UntilIdleFor must escalate to CancelImmediate")
+
+	exit := loop.Wait()
+	var ce *CancelError
+	require.True(t, errors.As(exit.ExitReason, &ce))
+	assert.Equal(t, CancelImmediate, ce.Info.Mode)
+}
+
+func TestAttack_UntilIdleFor_WithGraceful_SameCall_Dropped(t *testing.T) {
+	agentStarted := make(chan struct{})
+	agentCtxCanceled := int32(0)
+	agentDone := make(chan struct{})
+
+	loop := newAndRunTurnLoop(context.Background(), TurnLoopConfig[string]{
+		GenInput: func(ctx context.Context, _ *TurnLoop[string], items []string) (*GenInputResult[string], error) {
+			return &GenInputResult[string]{
+				Input:    &AgentInput{Messages: []Message{schema.UserMessage(items[0])}},
+				Consumed: items,
+			}, nil
+		},
+		PrepareAgent: func(ctx context.Context, _ *TurnLoop[string], consumed []string) (Agent, error) {
+			return &turnLoopCancellableMockAgent{
+				name: "test",
+				runFunc: func(ctx context.Context, input *AgentInput) (*AgentOutput, error) {
+					close(agentStarted)
+					select {
+					case <-ctx.Done():
+						atomic.StoreInt32(&agentCtxCanceled, 1)
+					case <-time.After(200 * time.Millisecond):
+					}
+					close(agentDone)
+					return &AgentOutput{}, nil
+				},
+			}, nil
+		},
+	})
+
+	loop.Push("msg1")
+	<-agentStarted
+
+	loop.Stop(UntilIdleFor(50*time.Millisecond), WithGraceful())
+	<-agentDone
+
+	exit := loop.Wait()
+	assert.Nil(t, exit.ExitReason, "WithGraceful in same call as UntilIdleFor must be dropped")
+	assert.Equal(t, int32(0), atomic.LoadInt32(&agentCtxCanceled),
+		"agent context should not have been canceled when WithGraceful is paired with UntilIdleFor")
+}
+
+func TestAttack_NonCancelOptsWhileAgentRunning(t *testing.T) {
+	agentStarted := make(chan struct{})
+	agentCtxErr := make(chan error, 1)
+	agentDone := make(chan struct{})
+
+	loop := newAndRunTurnLoop(context.Background(), TurnLoopConfig[string]{
+		GenInput: func(ctx context.Context, _ *TurnLoop[string], items []string) (*GenInputResult[string], error) {
+			return &GenInputResult[string]{
+				Input:    &AgentInput{Messages: []Message{schema.UserMessage(items[0])}},
+				Consumed: items,
+			}, nil
+		},
+		PrepareAgent: func(ctx context.Context, _ *TurnLoop[string], consumed []string) (Agent, error) {
+			return &turnLoopCancellableMockAgent{
+				name: "test",
+				runFunc: func(ctx context.Context, input *AgentInput) (*AgentOutput, error) {
+					close(agentStarted)
+					time.Sleep(150 * time.Millisecond)
+					agentCtxErr <- ctx.Err()
+					close(agentDone)
+					return &AgentOutput{}, nil
+				},
+			}, nil
+		},
+		Store:        &turnLoopCheckpointStore{m: make(map[string][]byte)},
+		CheckpointID: "test-noncancel-opts",
+	})
+
+	loop.Push("msg1")
+	<-agentStarted
+
+	loop.Stop(WithSkipCheckpoint(), WithStopCause("test-cause"))
+
+	select {
+	case <-agentDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("agent should complete without being canceled")
+	}
+
+	exit := loop.Wait()
+	assert.NoError(t, exit.ExitReason, "non-cancel opts should not produce CancelError")
+	assert.Equal(t, "test-cause", exit.StopCause)
+	assert.False(t, exit.Checkpointed, "WithSkipCheckpoint should skip checkpoint")
+
+	select {
+	case err := <-agentCtxErr:
+		assert.NoError(t, err, "agent context must not be canceled by non-cancel Stop opts")
+	default:
+		t.Fatal("agent never reported context state")
+	}
+}
+
+func TestAttack_UntilIdleAfterWithImmediate_PreservesCancelMode(t *testing.T) {
+	agentStarted := make(chan *cancelContext, 1)
+	probe := &turnLoopStopModeProbeAgent{ccCh: agentStarted}
+	loop := newAndRunTurnLoop(context.Background(), TurnLoopConfig[string]{
+		GenInput: func(ctx context.Context, _ *TurnLoop[string], items []string) (*GenInputResult[string], error) {
+			return &GenInputResult[string]{
+				Input:    &AgentInput{Messages: []Message{schema.UserMessage(items[0])}},
+				Consumed: items,
+			}, nil
+		},
+		PrepareAgent: func(ctx context.Context, _ *TurnLoop[string], consumed []string) (Agent, error) {
+			return probe, nil
+		},
+	})
+
+	loop.Push("msg1")
+	cc := <-agentStarted
+
+	loop.Stop(WithImmediate())
+	time.Sleep(20 * time.Millisecond)
+	mode := cc.getMode()
+	assert.Equal(t, CancelImmediate, mode, "WithImmediate should set CancelImmediate")
+
+	loop.Stop(UntilIdleFor(10 * time.Minute))
+	time.Sleep(20 * time.Millisecond)
+	mode = cc.getMode()
+	assert.Equal(t, CancelImmediate, mode, "UntilIdleFor after WithImmediate must not de-escalate cancel mode")
+
+	exit := loop.Wait()
+	var ce *CancelError
+	require.True(t, errors.As(exit.ExitReason, &ce))
+	assert.Equal(t, CancelImmediate, ce.Info.Mode)
+}
