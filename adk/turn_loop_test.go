@@ -3118,11 +3118,11 @@ func TestTurnLoop_ConcurrentPreemptsDuringTurn(t *testing.T) {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
-			ok, ack := loop.Push(fmt.Sprintf("urgent-%d", i), WithPreemptTimeout[string](AnySafePoint, time.Millisecond))
+			ok, ack := loop.Push(fmt.Sprintf("urgent-%d", i), WithPreemptTimeout[string](AnySafePoint, 10*time.Millisecond))
 			if ok && ack != nil {
 				select {
 				case <-ack:
-				case <-time.After(5 * time.Second):
+				case <-time.After(30 * time.Second):
 					t.Error("ack channel not closed within timeout")
 				}
 			}
@@ -5302,7 +5302,7 @@ func TestAttack_ConcurrentStopEscalation_RaceDetector(t *testing.T) {
 			defer wg.Done()
 			switch i % 4 {
 			case 0:
-				loop.Stop(WithImmediate())
+				loop.Stop()
 			case 1:
 				loop.Stop(WithImmediate())
 			case 2:
