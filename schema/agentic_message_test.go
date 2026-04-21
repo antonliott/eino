@@ -1593,7 +1593,9 @@ func TestNewContentBlock(t *testing.T) {
 				block = NewContentBlock(v)
 			case *UserInputFile:
 				block = NewContentBlock(v)
-			case *ToolSearchFunctionToolResult:
+			case *ServerSchemaToolCall:
+				block = NewContentBlock(v)
+			case *ServerSchemaToolResult:
 				block = NewContentBlock(v)
 			case *AssistantGenText:
 				block = NewContentBlock(v)

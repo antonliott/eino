@@ -36,14 +36,12 @@ type Options struct {
 	// on demand.
 	DeferredTools []*schema.ToolInfo
 
-	ToolSearchTool *schema.ToolInfo
-
 	// MaxTokens is the max number of tokens, if reached the max tokens, the model will stop generating, and mostly return a finish reason of "length".
 	MaxTokens *int
 	// Stop is the stop words for the model, which controls the stopping condition of the model.
 	Stop []string
 
-	// Options only available for chat model.
+	// Options only available for ChatModel.
 
 	// ToolChoice controls which tool is called by the model.
 	ToolChoice *schema.ToolChoice
@@ -51,9 +49,11 @@ type Options struct {
 	// This allows for constraining the model to a specific subset of the available tools.
 	AllowedToolNames []string
 
-	// Options only available for agentic model.
+	ToolSearchTool *schema.ToolInfo
 
-	// AgenticToolChoice controls how the agentic model calls tools.
+	// Options only available for AgenticModel.
+
+	// AgenticToolChoice controls how the AgenticModel calls tools.
 	AgenticToolChoice *schema.AgenticToolChoice
 }
 
@@ -127,6 +127,7 @@ func WithTools(tools []*schema.ToolInfo) Option {
 // WithToolSearchTool is the option to register a tool search tool with the model.
 // When set, the model uses this tool to discover and load deferred tools on demand.
 // Note: The tool search tool should NOT be included in WithTools.
+// Only available for ChatModel. For AgenticModel, use model-specific options to configure ToolSearchTool.
 func WithToolSearchTool(tool *schema.ToolInfo) Option {
 	return Option{
 		apply: func(opts *Options) {
@@ -163,7 +164,7 @@ func WithToolChoice(toolChoice schema.ToolChoice, allowedToolNames ...string) Op
 	}
 }
 
-// WithAgenticToolChoice is the option to set tool choice for the agentic model.
+// WithAgenticToolChoice is the option to set tool choice for the AgenticModel.
 // Only available for AgenticModel.
 func WithAgenticToolChoice(toolChoice *schema.AgenticToolChoice) Option {
 	return Option{
