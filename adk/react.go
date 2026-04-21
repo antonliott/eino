@@ -435,10 +435,24 @@ func newReact(ctx context.Context, config *reactConfig) (reactGraph, error) {
 	_ = g.AddLambdaNode(afterToolCallsCancelCheckNode_, compose.InvokableLambda(afterToolCallsCancelCheck),
 		compose.WithNodeName(afterToolCallsCancelCheckNode_))
 
+	// FinalAnswerRejection reads state.Messages (possibly modified by BeforeFinalAnswer hooks)
+	// and feeds them back to ChatModel for another iteration. Shared by both the model's
+	// final-answer path and the ReturnDirectly path.
+	const finalAnswerRejectionNode_ = "FinalAnswerRejection"
+	_ = g.AddLambdaNode(finalAnswerRejectionNode_, compose.InvokableLambda(func(ctx context.Context, _ Message) ([]Message, error) {
+		var msgs []Message
+		_ = compose.ProcessState(ctx, func(_ context.Context, st *State) error {
+			msgs = st.Messages
+			return nil
+		})
+		return msgs, nil
+	}), compose.WithNodeName(finalAnswerRejectionNode_))
+	_ = g.AddEdge(finalAnswerRejectionNode_, chatModel_)
+
 	_ = g.AddEdge(compose.START, initNode_)
 	_ = g.AddEdge(initNode_, chatModel_)
 
-	addFinalAnswerBranch(g, chatModel_, cancelCheckNode_, config.modelWrapperConf)
+	addFinalAnswerBranch(g, chatModel_, cancelCheckNode_, finalAnswerRejectionNode_, config.modelWrapperConf)
 
 	_ = g.AddEdge(cancelCheckNode_, toolNode_)
 	_ = g.AddEdge(toolNode_, afterToolCallsNode_)
@@ -462,7 +476,21 @@ func newReact(ctx context.Context, config *reactConfig) (reactGraph, error) {
 
 	_ = g.AddLambdaNode(toolNodeToEndConverter, compose.InvokableLambda(cvt),
 		compose.WithNodeName(toolNodeToEndConverter))
-	_ = g.AddEdge(toolNodeToEndConverter, compose.END)
+
+	// ReturnDirectly results also go through BeforeFinalAnswer hooks.
+	// If rejected, route to FinalAnswerRejection to loop back to ChatModel.
+	returnDirectFinalAnswerCheck := func(ctx context.Context, _ Message) (string, error) {
+		accepted, err := runBeforeFinalAnswer(ctx, config.modelWrapperConf)
+		if err != nil {
+			return "", err
+		}
+		if accepted {
+			return compose.END, nil
+		}
+		return finalAnswerRejectionNode_, nil
+	}
+	_ = g.AddBranch(toolNodeToEndConverter, compose.NewGraphBranch(returnDirectFinalAnswerCheck,
+		map[string]bool{compose.END: true, finalAnswerRejectionNode_: true}))
 
 	checkReturnDirect := func(ctx context.Context, toolResults []Message) (string, error) {
 		_, ok := getReturnDirectlyToolCallID(ctx)
@@ -493,7 +521,6 @@ func runBeforeFinalAnswer(ctx context.Context, mwConf *modelWrapperConfig) (bool
 	})
 
 	state := &ChatModelAgentState{Messages: stateMessages}
-	accepted := true
 
 	for _, handler := range mwConf.handlers {
 		var decision FinalAnswerDecision
@@ -507,32 +534,26 @@ func runBeforeFinalAnswer(ctx context.Context, mwConf *modelWrapperConfig) (bool
 			state = newState
 		}
 		if decision == RejectFinalAnswer {
-			accepted = false
+			// Short-circuit: write back state immediately and skip remaining handlers.
+			_ = compose.ProcessState(ctx, func(_ context.Context, st *State) error {
+				st.Messages = state.Messages
+				return nil
+			})
+			return false, nil
 		}
 	}
 
-	if !accepted {
-		_ = compose.ProcessState(ctx, func(_ context.Context, st *State) error {
-			st.Messages = state.Messages
-			return nil
-		})
-	}
+	// All handlers accepted — write back state in case any handler modified it
+	// (e.g., stripping thinking tokens, adding metadata).
+	_ = compose.ProcessState(ctx, func(_ context.Context, st *State) error {
+		st.Messages = state.Messages
+		return nil
+	})
 
-	return accepted, nil
+	return true, nil
 }
 
-func addFinalAnswerBranch(g *compose.Graph[*reactInput, Message], chatModelNode, cancelCheckNode string, mwConf *modelWrapperConfig) {
-	const finalAnswerRejectionNode_ = "FinalAnswerRejection"
-	_ = g.AddLambdaNode(finalAnswerRejectionNode_, compose.InvokableLambda(func(ctx context.Context, _ Message) ([]Message, error) {
-		var msgs []Message
-		_ = compose.ProcessState(ctx, func(_ context.Context, st *State) error {
-			msgs = st.Messages
-			return nil
-		})
-		return msgs, nil
-	}), compose.WithNodeName(finalAnswerRejectionNode_))
-	_ = g.AddEdge(finalAnswerRejectionNode_, chatModelNode)
-
+func addFinalAnswerBranch(g *compose.Graph[*reactInput, Message], chatModelNode, cancelCheckNode, finalAnswerRejectionNode string, mwConf *modelWrapperConfig) {
 	// toolCallCheck drains the model's output stream to determine routing:
 	// - If any chunk contains tool calls → route to tool execution (cancelCheckNode)
 	// - If stream ends with no tool calls → this is a final answer.
@@ -553,7 +574,7 @@ func addFinalAnswerBranch(g *compose.Graph[*reactInput, Message], chatModelNode,
 					if accepted {
 						return compose.END, nil
 					}
-					return finalAnswerRejectionNode_, nil
+					return finalAnswerRejectionNode, nil
 				}
 
 				return "", err_
@@ -564,7 +585,7 @@ func addFinalAnswerBranch(g *compose.Graph[*reactInput, Message], chatModelNode,
 			}
 		}
 	}
-	branch := compose.NewStreamGraphBranch(toolCallCheck, map[string]bool{compose.END: true, finalAnswerRejectionNode_: true, cancelCheckNode: true})
+	branch := compose.NewStreamGraphBranch(toolCallCheck, map[string]bool{compose.END: true, finalAnswerRejectionNode: true, cancelCheckNode: true})
 	_ = g.AddBranch(chatModelNode, branch)
 }
 

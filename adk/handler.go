@@ -230,23 +230,27 @@ type TypedChatModelAgentMiddleware[M messageType] interface {
 	// The hook can inspect the response (e.g., FinishReason, content) and decide whether
 	// to accept or reject it.
 	//
+	// Short-circuit semantics: Handlers execute in registration order. The first
+	// RejectFinalAnswer immediately stops the chain — remaining handlers are skipped.
+	// This allows users to control execution policy via registration order:
+	//   - Observers that must always run (e.g., memory extraction): register FIRST
+	//   - Quality gates that may reject (e.g., CI checks): register in the MIDDLE
+	//   - Observers that should only run on accepted answers: register LAST
+	//
 	// Returns:
-	//   - ctx: the (possibly modified) context. Note: context modifications are propagated
-	//     to subsequent handlers in the chain and used for state write-back, but are NOT
-	//     propagated to downstream graph nodes due to a compose framework constraint.
-	//     To pass data across iterations, use SetRunLocalValue/GetRunLocalValue instead.
-	//   - decision: AcceptFinalAnswer to exit the agent normally, or RejectFinalAnswer to
-	//     loop back to the ChatModel for another iteration. The handler may modify
-	//     state.Messages before rejecting (e.g., append a "please continue" user message
-	//     after a truncated response).
+	//   - ctx: the (possibly modified) context. Context modifications are propagated
+	//     to subsequent handlers in the chain (if not short-circuited) and used for
+	//     state write-back. Note: context is NOT propagated to downstream graph nodes
+	//     due to a compose framework constraint. To pass data across iterations, use
+	//     SetRunLocalValue/GetRunLocalValue instead.
+	//   - decision: AcceptFinalAnswer to continue the chain, or RejectFinalAnswer to
+	//     immediately stop the chain, write back state, and loop back to the ChatModel.
+	//     The handler may modify state.Messages before rejecting (e.g., append a
+	//     "please continue" user message after a truncated response).
 	//   - state: the (possibly modified) agent state. If nil, the previous state is preserved.
-	//   - error: if non-nil, the agent exits with this error
+	//   - error: if non-nil, the agent exits with this error (regardless of decision).
 	//
 	// Rejected answers count toward MaxIterations, providing a natural cap on runaway loops.
-	//
-	// When multiple handlers are registered, all handlers execute in order even if an earlier
-	// handler rejects. A single RejectFinalAnswer from any handler vetoes the final answer.
-	// Handlers see state modifications from prior handlers in the chain.
 	BeforeFinalAnswer(ctx context.Context, state *ChatModelAgentState) (context.Context, FinalAnswerDecision, *ChatModelAgentState, error)
 }
 
@@ -254,11 +258,14 @@ type TypedChatModelAgentMiddleware[M messageType] interface {
 type FinalAnswerDecision int
 
 const (
-	// AcceptFinalAnswer indicates the final answer should be accepted and the agent exits normally.
+	// AcceptFinalAnswer indicates this handler accepts the final answer.
+	// The chain continues to the next handler. If all handlers accept,
+	// the agent exits normally.
 	AcceptFinalAnswer FinalAnswerDecision = iota
 
-	// RejectFinalAnswer indicates the final answer should be rejected and the agent loops
-	// back to the ChatModel for another iteration.
+	// RejectFinalAnswer indicates this handler rejects the final answer.
+	// The chain is immediately short-circuited: remaining handlers are skipped,
+	// state is written back, and the agent loops back to the ChatModel.
 	RejectFinalAnswer
 )
 
