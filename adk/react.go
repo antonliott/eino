@@ -480,7 +480,7 @@ func newReact(ctx context.Context, config *reactConfig) (reactGraph, error) {
 	// ReturnDirectly results also go through BeforeFinalAnswer hooks.
 	// If rejected, route to FinalAnswerRejection to loop back to ChatModel.
 	returnDirectFinalAnswerCheck := func(ctx context.Context, _ Message) (string, error) {
-		accepted, err := runBeforeFinalAnswer(ctx, config.modelWrapperConf)
+		accepted, err := runTypedBeforeFinalAnswer(ctx, config.modelWrapperConf)
 		if err != nil {
 			return "", err
 		}
@@ -509,22 +509,22 @@ func newReact(ctx context.Context, config *reactConfig) (reactGraph, error) {
 	return g, nil
 }
 
-func runBeforeFinalAnswer(ctx context.Context, mwConf *modelWrapperConfig) (bool, error) {
+func runTypedBeforeFinalAnswer[M messageType](ctx context.Context, mwConf *typedModelWrapperConfig[M]) (bool, error) {
 	if mwConf == nil || len(mwConf.handlers) == 0 {
 		return true, nil
 	}
 
-	var stateMessages []Message
-	_ = compose.ProcessState(ctx, func(_ context.Context, st *State) error {
+	var stateMessages []M
+	_ = compose.ProcessState(ctx, func(_ context.Context, st *typedState[M]) error {
 		stateMessages = st.Messages
 		return nil
 	})
 
-	state := &ChatModelAgentState{Messages: stateMessages}
+	state := &TypedChatModelAgentState[M]{Messages: stateMessages}
 
 	for _, handler := range mwConf.handlers {
 		var decision FinalAnswerDecision
-		var newState *ChatModelAgentState
+		var newState *TypedChatModelAgentState[M]
 		var err error
 		ctx, decision, newState, err = handler.BeforeFinalAnswer(ctx, state)
 		if err != nil {
@@ -535,7 +535,7 @@ func runBeforeFinalAnswer(ctx context.Context, mwConf *modelWrapperConfig) (bool
 		}
 		if decision == RejectFinalAnswer {
 			// Short-circuit: write back state immediately and skip remaining handlers.
-			_ = compose.ProcessState(ctx, func(_ context.Context, st *State) error {
+			_ = compose.ProcessState(ctx, func(_ context.Context, st *typedState[M]) error {
 				st.Messages = state.Messages
 				return nil
 			})
@@ -545,7 +545,7 @@ func runBeforeFinalAnswer(ctx context.Context, mwConf *modelWrapperConfig) (bool
 
 	// All handlers accepted — write back state in case any handler modified it
 	// (e.g., stripping thinking tokens, adding metadata).
-	_ = compose.ProcessState(ctx, func(_ context.Context, st *State) error {
+	_ = compose.ProcessState(ctx, func(_ context.Context, st *typedState[M]) error {
 		st.Messages = state.Messages
 		return nil
 	})
@@ -567,7 +567,7 @@ func addFinalAnswerBranch(g *compose.Graph[*reactInput, Message], chatModelNode,
 			chunk, err_ := sMsg.Recv()
 			if err_ != nil {
 				if err_ == io.EOF {
-					accepted, err := runBeforeFinalAnswer(ctx, mwConf)
+					accepted, err := runTypedBeforeFinalAnswer(ctx, mwConf)
 					if err != nil {
 						return "", err
 					}
@@ -736,6 +736,20 @@ func newAgenticReact(ctx context.Context, config *agenticReactConfig) (agenticRe
 	_ = g.AddLambdaNode(afterToolCallsCancelCheckNode_, compose.InvokableLambda(afterToolCallsCancelCheck),
 		compose.WithNodeName(afterToolCallsCancelCheckNode_))
 
+	// FinalAnswerRejection reads state.Messages (possibly modified by BeforeFinalAnswer hooks)
+	// and feeds them back to ChatModel for another iteration. Shared by both the model's
+	// final-answer path and the ReturnDirectly path.
+	const finalAnswerRejectionNode_ = "FinalAnswerRejection"
+	_ = g.AddLambdaNode(finalAnswerRejectionNode_, compose.InvokableLambda(func(ctx context.Context, _ *schema.AgenticMessage) ([]*schema.AgenticMessage, error) {
+		var msgs []*schema.AgenticMessage
+		_ = compose.ProcessState(ctx, func(_ context.Context, st *agenticState) error {
+			msgs = st.Messages
+			return nil
+		})
+		return msgs, nil
+	}), compose.WithNodeName(finalAnswerRejectionNode_))
+	_ = g.AddEdge(finalAnswerRejectionNode_, chatModel_)
+
 	_ = g.AddEdge(compose.START, initNode_)
 	_ = g.AddEdge(initNode_, chatModel_)
 
@@ -745,7 +759,14 @@ func newAgenticReact(ctx context.Context, config *agenticReactConfig) (agenticRe
 			chunk, err_ := sMsg.Recv()
 			if err_ != nil {
 				if err_ == io.EOF {
-					return compose.END, nil
+					accepted, err := runTypedBeforeFinalAnswer(ctx, config.modelWrapperConf)
+					if err != nil {
+						return "", err
+					}
+					if accepted {
+						return compose.END, nil
+					}
+					return finalAnswerRejectionNode_, nil
 				}
 				return "", err_
 			}
@@ -754,7 +775,7 @@ func newAgenticReact(ctx context.Context, config *agenticReactConfig) (agenticRe
 			}
 		}
 	}
-	branch := compose.NewStreamGraphBranch(toolCallCheck, map[string]bool{compose.END: true, cancelCheckNode_: true})
+	branch := compose.NewStreamGraphBranch(toolCallCheck, map[string]bool{compose.END: true, cancelCheckNode_: true, finalAnswerRejectionNode_: true})
 	_ = g.AddBranch(chatModel_, branch)
 
 	_ = g.AddEdge(cancelCheckNode_, toolNode_)
@@ -784,7 +805,21 @@ func newAgenticReact(ctx context.Context, config *agenticReactConfig) (agenticRe
 
 		_ = g.AddLambdaNode(toolNodeToEndConverter, compose.InvokableLambda(cvt),
 			compose.WithNodeName(toolNodeToEndConverter))
-		_ = g.AddEdge(toolNodeToEndConverter, compose.END)
+
+		// ReturnDirectly results also go through BeforeFinalAnswer hooks.
+		// If rejected, route to FinalAnswerRejection to loop back to ChatModel.
+		returnDirectFinalAnswerCheck := func(ctx context.Context, _ *schema.AgenticMessage) (string, error) {
+			accepted, err := runTypedBeforeFinalAnswer(ctx, config.modelWrapperConf)
+			if err != nil {
+				return "", err
+			}
+			if accepted {
+				return compose.END, nil
+			}
+			return finalAnswerRejectionNode_, nil
+		}
+		_ = g.AddBranch(toolNodeToEndConverter, compose.NewGraphBranch(returnDirectFinalAnswerCheck,
+			map[string]bool{compose.END: true, finalAnswerRejectionNode_: true}))
 
 		checkReturnDirect := func(ctx context.Context, toolResults []*schema.AgenticMessage) (string, error) {
 			_, ok := getAgenticReturnDirectlyToolCallID(ctx)

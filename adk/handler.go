@@ -251,7 +251,7 @@ type TypedChatModelAgentMiddleware[M messageType] interface {
 	//   - error: if non-nil, the agent exits with this error (regardless of decision).
 	//
 	// Rejected answers count toward MaxIterations, providing a natural cap on runaway loops.
-	BeforeFinalAnswer(ctx context.Context, state *ChatModelAgentState) (context.Context, FinalAnswerDecision, *ChatModelAgentState, error)
+	BeforeFinalAnswer(ctx context.Context, state *TypedChatModelAgentState[M]) (context.Context, FinalAnswerDecision, *TypedChatModelAgentState[M], error)
 }
 
 // FinalAnswerDecision represents the decision made by a BeforeFinalAnswer hook.
@@ -327,7 +327,7 @@ func (b *TypedBaseChatModelAgentMiddleware[M]) AfterToolCallsRewriteState(ctx co
 	return ctx, state, nil
 }
 
-func (b *TypedBaseChatModelAgentMiddleware[M]) BeforeFinalAnswer(ctx context.Context, state *ChatModelAgentState) (context.Context, FinalAnswerDecision, *ChatModelAgentState, error) {
+func (b *TypedBaseChatModelAgentMiddleware[M]) BeforeFinalAnswer(ctx context.Context, state *TypedChatModelAgentState[M]) (context.Context, FinalAnswerDecision, *TypedChatModelAgentState[M], error) {
 	return ctx, AcceptFinalAnswer, state, nil
 }
 
