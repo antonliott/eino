@@ -1295,7 +1295,7 @@ func (a *TypedChatModelAgent[M]) buildRunFunc(ctx context.Context) typedRunFunc[
 
 		a.exeCtx = ec
 
-		if len(ec.toolsNodeConf.Tools) == 0 {
+		if len(ec.toolsNodeConf.Tools) == 0 && len(a.handlers) == 0 {
 			var run typedRunFunc[M]
 			run, err = a.buildNoToolsRunFunc(ctx)
 			if err != nil {
@@ -1344,22 +1344,6 @@ func (a *TypedChatModelAgent[M]) getRunFunc(ctx context.Context) (context.Contex
 	}
 
 	return ctx, defaultRun, runtimeBC, nil
-}
-
-	var tempRun typedRunFunc[M]
-	if len(runtimeBC.toolsNodeConf.Tools) == 0 {
-		tempRun, err = a.buildNoToolsRunFunc(ctx)
-		if err != nil {
-			return ctx, nil, nil, err
-		}
-	} else {
-		tempRun, err = a.buildReActRunFunc(ctx, runtimeBC)
-		if err != nil {
-			return ctx, nil, nil, err
-		}
-	}
-
-	return ctx, tempRun, runtimeBC, nil
 }
 
 func (a *TypedChatModelAgent[M]) Run(ctx context.Context, input *TypedAgentInput[M], opts ...AgentRunOption) *AsyncIterator[*TypedAgentEvent[M]] {

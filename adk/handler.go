@@ -327,7 +327,7 @@ func (b *TypedBaseChatModelAgentMiddleware[M]) AfterToolCallsRewriteState(ctx co
 	return ctx, state, nil
 }
 
-func (b *BaseChatModelAgentMiddleware) BeforeFinalAnswer(ctx context.Context, state *ChatModelAgentState) (context.Context, FinalAnswerDecision, *ChatModelAgentState, error) {
+func (b *TypedBaseChatModelAgentMiddleware[M]) BeforeFinalAnswer(ctx context.Context, state *ChatModelAgentState) (context.Context, FinalAnswerDecision, *ChatModelAgentState, error) {
 	return ctx, AcceptFinalAnswer, state, nil
 }
 
