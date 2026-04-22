@@ -18,6 +18,7 @@ package adk
 
 import (
 	"context"
+	"fmt"
 	"sync"
 	"testing"
 
@@ -1965,6 +1966,108 @@ func TestAfterToolCallsHook(t *testing.T) {
 		}
 
 		assert.Equal(t, 1, hookToolResultCount, "Tool results should be in state when hook fires")
+	})
+
+	t.Run("HookErrorPropagation", func(t *testing.T) {
+		ctx := context.Background()
+		ctrl := gomock.NewController(t)
+		cm := mockModel.NewMockToolCallingChatModel(ctrl)
+
+		tool1 := &namedTool{name: "mytool"}
+		cm.EXPECT().WithTools(gomock.Any()).Return(cm, nil).AnyTimes()
+
+		cm.EXPECT().Generate(gomock.Any(), gomock.Any(), gomock.Any()).
+			Return(schema.AssistantMessage("calling", []schema.ToolCall{
+				{ID: "c1", Function: schema.FunctionCall{Name: "mytool", Arguments: "{}"}},
+			}), nil).Times(1)
+
+		agent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+			Name:        "TestAgent",
+			Description: "Test agent",
+			Model:       cm,
+			ToolsConfig: ToolsConfig{
+				ToolsNodeConfig: compose.ToolsNodeConfig{
+					Tools: []tool.BaseTool{tool1},
+				},
+			},
+		})
+		assert.NoError(t, err)
+
+		iter := agent.Run(ctx, &AgentInput{Messages: []Message{schema.UserMessage("test")}},
+			WithAfterToolCallsHook(func(ctx context.Context) error {
+				return fmt.Errorf("hook failure")
+			}))
+
+		var sawError bool
+		for {
+			ev, ok := iter.Next()
+			if !ok {
+				break
+			}
+			if ev.Err != nil {
+				assert.Contains(t, ev.Err.Error(), "hook failure")
+				sawError = true
+			}
+		}
+		assert.True(t, sawError, "hook error should propagate as an agent error event")
+	})
+
+	t.Run("HookCalledPerIteration", func(t *testing.T) {
+		ctx := context.Background()
+		ctrl := gomock.NewController(t)
+		cm := mockModel.NewMockToolCallingChatModel(ctrl)
+
+		tool1 := &namedTool{name: "mytool"}
+		cm.EXPECT().WithTools(gomock.Any()).Return(cm, nil).AnyTimes()
+
+		// Iteration 1: tool call
+		cm.EXPECT().Generate(gomock.Any(), gomock.Any(), gomock.Any()).
+			Return(schema.AssistantMessage("calling1", []schema.ToolCall{
+				{ID: "c1", Function: schema.FunctionCall{Name: "mytool", Arguments: "{}"}},
+			}), nil).Times(1)
+
+		// Iteration 2: tool call again
+		cm.EXPECT().Generate(gomock.Any(), gomock.Any(), gomock.Any()).
+			Return(schema.AssistantMessage("calling2", []schema.ToolCall{
+				{ID: "c2", Function: schema.FunctionCall{Name: "mytool", Arguments: "{}"}},
+			}), nil).Times(1)
+
+		// Iteration 3: final answer
+		cm.EXPECT().Generate(gomock.Any(), gomock.Any(), gomock.Any()).
+			Return(schema.AssistantMessage("done", nil), nil).Times(1)
+
+		var mu sync.Mutex
+		hookCount := 0
+
+		agent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+			Name:        "TestAgent",
+			Description: "Test agent",
+			Model:       cm,
+			ToolsConfig: ToolsConfig{
+				ToolsNodeConfig: compose.ToolsNodeConfig{
+					Tools: []tool.BaseTool{tool1},
+				},
+			},
+		})
+		assert.NoError(t, err)
+
+		iter := agent.Run(ctx, &AgentInput{Messages: []Message{schema.UserMessage("test")}},
+			WithAfterToolCallsHook(func(ctx context.Context) error {
+				mu.Lock()
+				hookCount++
+				mu.Unlock()
+				return nil
+			}))
+		for {
+			_, ok := iter.Next()
+			if !ok {
+				break
+			}
+		}
+
+		mu.Lock()
+		defer mu.Unlock()
+		assert.Equal(t, 2, hookCount, "hook should fire once per tool-call iteration")
 	})
 }
 
