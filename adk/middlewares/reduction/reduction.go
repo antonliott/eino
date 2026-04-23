@@ -421,6 +421,96 @@ func (t *toolReductionMiddleware) WrapStreamableToolCall(_ context.Context, endp
 	}, nil
 }
 
+func (t *toolReductionMiddleware) WrapEnhancedInvokableToolCall(ctx context.Context, endpoint adk.EnhancedInvokableToolCallEndpoint, tCtx *adk.ToolContext) (adk.EnhancedInvokableToolCallEndpoint, error) {
+	cfg := t.getToolConfig(tCtx.Name, sceneTruncation)
+	if cfg == nil || cfg.TruncHandler == nil {
+		return endpoint, nil
+	}
+	if _, excluded := t.excludeTruncTools[tCtx.Name]; excluded {
+		return endpoint, nil
+	}
+
+	return func(ctx context.Context, toolArgument *schema.ToolArgument, opts ...tool.Option) (*schema.ToolResult, error) {
+		output, err := endpoint(ctx, toolArgument, opts...)
+		if err != nil {
+			return nil, err
+		}
+		detail := &ToolDetail{
+			ToolContext:  tCtx,
+			ToolArgument: toolArgument,
+			ToolResult:   output,
+		}
+		truncResult, err := cfg.TruncHandler(ctx, detail)
+		if err != nil {
+			return nil, err
+		}
+		if !truncResult.NeedTrunc {
+			return output, nil
+		}
+		if truncResult.NeedOffload {
+			if cfg.Backend == nil {
+				return nil, fmt.Errorf("truncation: no backend for offload")
+			}
+			if err = cfg.Backend.Write(ctx, &filesystem.WriteRequest{
+				FilePath: truncResult.OffloadFilePath,
+				Content:  truncResult.OffloadContent,
+			}); err != nil {
+				return nil, err
+			}
+		}
+		return truncResult.ToolResult, nil
+	}, nil
+}
+
+func (t *toolReductionMiddleware) WrapEnhancedStreamableToolCall(ctx context.Context, endpoint adk.EnhancedStreamableToolCallEndpoint, tCtx *adk.ToolContext) (adk.EnhancedStreamableToolCallEndpoint, error) {
+	cfg := t.getToolConfig(tCtx.Name, sceneTruncation)
+	if cfg == nil || cfg.TruncHandler == nil {
+		return endpoint, nil
+	}
+	if _, excluded := t.excludeTruncTools[tCtx.Name]; excluded {
+		return endpoint, nil
+	}
+
+	return func(ctx context.Context, toolArgument *schema.ToolArgument, opts ...tool.Option) (*schema.StreamReader[*schema.ToolResult], error) {
+		output, err := endpoint(ctx, toolArgument, opts...)
+		if err != nil {
+			return nil, err
+		}
+
+		readers := output.Copy(2)
+		output = readers[0]
+		origResp := readers[1]
+
+		detail := &ToolDetail{
+			ToolContext:      tCtx,
+			ToolArgument:     toolArgument,
+			StreamToolResult: output,
+		}
+		truncResult, err := cfg.TruncHandler(ctx, detail)
+		if err != nil {
+			return nil, err
+		}
+		if !truncResult.NeedTrunc {
+			return origResp, nil
+		}
+		origResp.Close() // close err resp when not using it
+
+		if truncResult.NeedOffload {
+			if cfg.Backend == nil {
+				return nil, fmt.Errorf("truncation: no backend for offload")
+			}
+			if err = cfg.Backend.Write(ctx, &filesystem.WriteRequest{
+				FilePath: truncResult.OffloadFilePath,
+				Content:  truncResult.OffloadContent,
+			}); err != nil {
+				return nil, err
+			}
+		}
+
+		return truncResult.StreamToolResult, nil
+	}, nil
+}
+
 func (t *toolReductionMiddleware) BeforeModelRewriteState(ctx context.Context, state *adk.ChatModelAgentState, mc *adk.ModelContext) (
 	context.Context, *adk.ChatModelAgentState, error) {
 
