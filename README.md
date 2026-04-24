@@ -81,6 +81,11 @@ eino/
 ## Personal Notes
 
 > **Note (personal fork):** I'm using this fork primarily to experiment with custom `Retriever` implementations and RAG pipeline patterns. The upstream repo moves fast — I'll periodically sync from `cloudwego/eino:main`.
+>
+> **Current experiments:**
+> - Custom BM25 + vector hybrid retriever in `components/retriever/hybrid/`
+> - Testing chunk overlap strategies for long-document RAG
+> - Benchmarking graph vs. chain performance for simple sequential pipelines
 
 ## Contributing
 
@@ -97,4 +102,4 @@ This project is licensed under the Apache License 2.0 — see the [LICENSE](LICE
 
 ## Acknowledgements
 
-This project is a fork of [cloudwego/eino](https://github.com/cloudwego/eino), originally developed by the CloudWeGo team at ByteDance.
+This project is a fork of [cloudwego/eino](https://github.com/cloudwego/eino).
