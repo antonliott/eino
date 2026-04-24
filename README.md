@@ -78,6 +78,10 @@ eino/
 └── utils/          # Utility helpers
 ```
 
+## Personal Notes
+
+> **Note (personal fork):** I'm using this fork primarily to experiment with custom `Retriever` implementations and RAG pipeline patterns. The upstream repo moves fast — I'll periodically sync from `cloudwego/eino:main`.
+
 ## Contributing
 
 We welcome contributions! Please see our [Pull Request Template](.github/PULL_REQUEST_TEMPLATE.md) and follow the commit conventions described in [`.github/.commit-rules.json`](.github/.commit-rules.json).
