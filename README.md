@@ -86,6 +86,9 @@ eino/
 > - Custom BM25 + vector hybrid retriever in `components/retriever/hybrid/`
 > - Testing chunk overlap strategies for long-document RAG
 > - Benchmarking graph vs. chain performance for simple sequential pipelines
+>
+> **Sync log:**
+> - 2025-06-10: Synced with upstream `cloudwego/eino@main` (commit `a3f91c2`)
 
 ## Contributing
 
@@ -95,11 +98,3 @@ We welcome contributions! Please see our [Pull Request Template](.github/PULL_RE
 2. Create your feature branch (`git checkout -b feat/amazing-feature`)
 3. Commit your changes following conventional commits
 4. Push to the branch and open a Pull Request
-
-## License
-
-This project is licensed under the Apache License 2.0 — see the [LICENSE](LICENSE) file for details.
-
-## Acknowledgements
-
-This project is a fork of [cloudwego/eino](https://github.com/cloudwego/eino).
