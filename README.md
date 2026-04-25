@@ -86,14 +86,13 @@ eino/
 > - Custom BM25 + vector hybrid retriever in `components/retriever/hybrid/`
 > - Testing chunk overlap strategies for long-document RAG
 > - Benchmarking graph vs. chain performance for simple sequential pipelines
+> - Exploring context window management for multi-turn conversations
 >
 > **Sync log:**
+> - 2025-07-14: Synced with upstream `cloudwego/eino@main` (commit `f1c3a77`)
 > - 2025-07-02: Synced with upstream `cloudwego/eino@main` (commit `d7b04e8`)
 > - 2025-06-10: Synced with upstream `cloudwego/eino@main` (commit `a3f91c2`)
 
 ## Contributing
 
 We welcome contributions! Please see our [Pull Request Template](.github/PULL_REQUEST_TEMPLATE.md) and follow the commit conventions described in [`.github/.commit-rules.json`](.github/.commit-rules.json).
-
-1. Fork the repository
-2. Create your feature branch (`git check
