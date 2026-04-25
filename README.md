@@ -88,6 +88,7 @@ eino/
 > - Benchmarking graph vs. chain performance for simple sequential pipelines
 >
 > **Sync log:**
+> - 2025-07-02: Synced with upstream `cloudwego/eino@main` (commit `d7b04e8`)
 > - 2025-06-10: Synced with upstream `cloudwego/eino@main` (commit `a3f91c2`)
 
 ## Contributing
@@ -95,6 +96,4 @@ eino/
 We welcome contributions! Please see our [Pull Request Template](.github/PULL_REQUEST_TEMPLATE.md) and follow the commit conventions described in [`.github/.commit-rules.json`](.github/.commit-rules.json).
 
 1. Fork the repository
-2. Create your feature branch (`git checkout -b feat/amazing-feature`)
-3. Commit your changes following conventional commits
-4. Push to the branch and open a Pull Request
+2. Create your feature branch (`git check
