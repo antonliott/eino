@@ -21,3 +21,5 @@ require (
 )
 
 // personal fork: studying eino's graph execution and callback mechanisms
+// TODO: explore how graph nodes handle concurrent execution and whether
+//       callback hooks can be extended for custom tracing/observability
